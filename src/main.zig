@@ -1,281 +1,153 @@
 const std = @import("std");
 const sphtud = @import("sphtud");
+const cl = @import("cl.zig");
+const math = @import("math.zig");
 
-const TwoParam = struct {
-    in1: *TrackedF32,
-    in2: *TrackedF32,
-};
-const Operation = union(enum) {
-    init,
-    add: TwoParam,
-    sub: TwoParam,
-    mul: TwoParam,
-    sigmoid: *TrackedF32,
-    pow: struct {
-        in1: *TrackedF32,
-        in2: f32,
-    },
-};
+fn OpenClLayerGen(comptime Executor: type) type {
+    return struct {
+        cl_alloc: *cl.Alloc,
+        math_executor: *Executor,
 
-const TrackedF32 = struct {
-    val: f32,
-    op: Operation,
-    gradient: f32 = 0.0,
+        const Self = @This();
 
-    fn init(alloc: std.mem.Allocator, val: f32) !*TrackedF32 {
-        const ret = try alloc.create(TrackedF32);
-        ret.* = .{
-            .val = val,
-            .op = .init,
+        const FullyConnected = struct {
+            math_executor: *Executor,
+            weights: Executor.Tensor,
+            biases: Executor.Tensor,
+
+            fn init(scratch: *sphtud.alloc.BufAllocator, cl_alloc: *cl.Alloc, math_executor: *Executor, inputs: u32, outputs: u32) !FullyConnected {
+                const cp = scratch.checkpoint();
+                defer scratch.restore(cp);
+
+                // 2 inputs, 1 output
+                const initial_weights = try scratch.allocator().alloc(f32, inputs * outputs);
+                @memset(initial_weights, 0);
+
+                const weights = try math_executor.createTensor(cl_alloc, initial_weights, &.{ inputs, outputs });
+                const biases = try math_executor.createTensor(cl_alloc, initial_weights[0..outputs], &.{outputs});
+
+                try weights.event.wait();
+                try biases.event.wait();
+
+                return .{
+                    .math_executor = math_executor,
+                    .weights = weights.val,
+                    .biases = biases.val,
+                };
+            }
+
+            fn execute(self: FullyConnected, cl_alloc: *cl.Alloc, input: Executor.Tensor) !Executor.Tensor {
+                const mul_res = try self.math_executor.matmul(cl_alloc, self.weights, input);
+                const with_bias = try self.math_executor.addSplatHorizontal(cl_alloc, self.biases, mul_res);
+                return self.math_executor.sigmoid(cl_alloc, with_bias);
+            }
         };
-        return ret;
-    }
 
-    fn add(alloc: std.mem.Allocator, a: *TrackedF32, b: *TrackedF32) !*TrackedF32 {
-        const ret = try alloc.create(TrackedF32);
-        ret.* = .{
-            .val = a.val + b.val,
-            .op = .{
-                .add = .{
-                    .in1 = a,
-                    .in2 = b,
-                },
-            },
-        };
-        return ret;
-    }
-
-    fn sub(alloc: std.mem.Allocator, a: *TrackedF32, b: *TrackedF32) !*TrackedF32 {
-        const ret = try alloc.create(TrackedF32);
-        ret.* = .{
-            .val = a.val - b.val,
-            .op = .{
-                .sub = .{
-                    .in1 = a,
-                    .in2 = b,
-                },
-            },
-        };
-        return ret;
-    }
-
-    fn mul(alloc: std.mem.Allocator, a: *TrackedF32, b: *TrackedF32) !*TrackedF32 {
-        const ret = try alloc.create(TrackedF32);
-        ret.* = .{
-            .val = a.val * b.val,
-            .op = .{
-                .mul = .{
-                    .in1 = a,
-                    .in2 = b,
-                },
-            },
-        };
-        return ret;
-    }
-
-    fn sigmoid(alloc: std.mem.Allocator, a: *TrackedF32) !*TrackedF32 {
-        const ret = try alloc.create(TrackedF32);
-        ret.* = .{
-            .val = 1.0 / (1.0 + std.math.exp(-a.val)),
-            .op = .{ .sigmoid = a },
-        };
-        return ret;
-    }
-
-    fn pow(alloc: std.mem.Allocator, a: *TrackedF32, b: f32) !*TrackedF32 {
-        const ret = try alloc.create(TrackedF32);
-        ret.* = .{
-            .val = std.math.pow(f32, a.val, b),
-            .op = .{
-                .pow = .{
-                    .in1 = a,
-                    .in2 = b,
-                },
-            },
-        };
-        return ret;
-    }
-
-    fn backprop(self: *TrackedF32, downstream_gradient: f32) void {
-        switch (self.op) {
-            .init => return,
-            .add => |params| {
-                const in1_grad = 1.0 * downstream_gradient;
-                const in2_grad = 1.0 * downstream_gradient;
-
-                params.in1.gradient += in1_grad;
-                params.in2.gradient += in2_grad;
-
-                params.in1.backprop(in1_grad);
-                params.in2.backprop(in2_grad);
-            },
-            .mul => |params| {
-                const in1_grad = params.in2.val * downstream_gradient;
-                const in2_grad = params.in1.val * downstream_gradient;
-
-                params.in1.gradient += in1_grad;
-                params.in2.gradient += in2_grad;
-
-                params.in1.backprop(in1_grad);
-                params.in2.backprop(in2_grad);
-            },
-            .pow => |params| {
-                const grad = params.in1.val * params.in2 * downstream_gradient;
-                params.in1.gradient += grad;
-                params.in1.backprop(grad);
-            },
-            .sub => |params| {
-                const in1_grad = 1.0 * downstream_gradient;
-                const in2_grad = -1.0 * downstream_gradient;
-
-                params.in1.gradient += in1_grad;
-                params.in2.gradient += in2_grad;
-
-                params.in1.backprop(in1_grad);
-                params.in2.backprop(in2_grad);
-            },
-            .sigmoid => |input| {
-                const x = input.val;
-                const enx = std.math.exp(-x);
-                const enxp1 = (enx + 1);
-
-                const grad = enx / enxp1 / enxp1 * downstream_gradient;
-                input.gradient += grad;
-                input.backprop(grad);
-            },
+        fn fullyConnected(self: Self, scratch: *sphtud.alloc.BufAllocator, inputs: u32, outputs: u32) !FullyConnected {
+            return FullyConnected.init(
+                scratch,
+                self.cl_alloc,
+                self.math_executor,
+                inputs,
+                outputs,
+            );
         }
-    }
-};
-
-fn sigmoid(in: f32) f32 {
-    return 1.0 / (1.0 + std.math.exp(-in));
+    };
 }
 
-const Network = struct {
-    weights: [2]*TrackedF32,
-    biases: [2]*TrackedF32,
+const Optimizer = struct {
+    weights: sphtud.util.RuntimeBoundedArray(math.TracingExecutor.Tensor),
+    traced: *math.TracingExecutor,
+    executor: math.Executor,
 
-    fn init(alloc: std.mem.Allocator, rng: std.Random) !Network {
-        return .{
-            .weights = .{
-                try TrackedF32.init(alloc, (rng.float(f32) - 0.5) * 10.0),
-                try TrackedF32.init(alloc, (rng.float(f32) - 0.5) * 10.0),
-            },
-            .biases = .{
-                try TrackedF32.init(alloc, (rng.float(f32) - 0.5) * 10.0),
-                try TrackedF32.init(alloc, (rng.float(f32) - 0.5) * 10.0),
-            },
-        };
+    fn registerWeights(self: *Optimizer, weights: math.TracingExecutor.Tensor) !void {
+        try self.weights.append(weights);
     }
 
-    fn run(self: *Network, alloc: std.mem.Allocator, a: f32, b: f32) !*TrackedF32 {
-        const a_tracked = try TrackedF32.init(alloc, a);
-        const b_tracked = try TrackedF32.init(alloc, b);
-
-        const a_out = try TrackedF32.add(
-            alloc,
-            try TrackedF32.mul(alloc, self.weights[0], a_tracked),
-            self.biases[0],
-        );
-
-        const b_out = try TrackedF32.add(
-            alloc,
-            try TrackedF32.mul(alloc, self.weights[1], b_tracked),
-            self.biases[1],
-        );
-
-        return TrackedF32.sigmoid(
-            alloc,
-            try TrackedF32.add(alloc, a_out, b_out),
-        );
-    }
-
-    fn optimize(self: *Network) void {
+    fn optimize(self: Optimizer, cl_alloc: *cl.Alloc, gradients: math.TracingExecutor.Gradients) !void {
         const lr = 0.001;
-        for (&self.weights) |w| {
-            w.val -= w.gradient * lr;
-        }
 
-        for (&self.biases) |b| {
-            b.val -= b.gradient * lr;
-        }
-        self.clearGrad();
-    }
-
-    fn clearGrad(self: *Network) void {
-        for (&self.weights) |w| {
-            w.gradient = 0;
-        }
-
-        for (&self.biases) |w| {
-            w.gradient = 0;
+        for (self.weights.items) |item| {
+            const item_grad = gradients.get(item.buf);
+            const tensor = self.traced.getClTensor(item.buf);
+            const weighted_grad = try self.executor.mulScalar(cl_alloc, item_grad, -lr);
+            try self.executor.addAssign(tensor, weighted_grad);
         }
     }
 };
-
-fn printNet(input: *TrackedF32, indent_level: usize) void {
-    for (0..indent_level) |_| {
-        std.debug.print("\t", .{});
-    }
-    std.debug.print("{s}: {d} {d}\n", .{ @tagName(input.op), input.val, input.gradient });
-
-    if (input.in1) |in1| {
-        printNet(in1, indent_level + 1);
-    }
-
-    if (input.in2) |in2| {
-        printNet(in2, indent_level + 1);
-    }
-}
 
 pub fn main() !void {
     var arena = sphtud.alloc.BufAllocator.init(try std.heap.page_allocator.alloc(u8, 10 * 1024 * 1024));
 
+    const cl_executor = try cl.Executor.init();
+    defer cl_executor.deinit();
+
+    var cl_alloc = try cl.Alloc.init(try arena.allocator().alloc(u8, 1 * 1024 * 1024));
+    defer cl_alloc.deinit();
+
     var rng = std.Random.DefaultPrng.init(0);
     var rand = rng.random();
 
-    var net = try Network.init(arena.allocator(), rand);
+    const math_executor = try math.Executor.init(&cl_alloc, cl_executor);
+    var tracing_executor = try math.TracingExecutor.init(math_executor, arena.allocator(), 100);
+
+    const layer_gen = OpenClLayerGen(math.TracingExecutor){
+        .math_executor = &tracing_executor,
+        .cl_alloc = &cl_alloc,
+    };
+
+    var optimizer = Optimizer{
+        .executor = math_executor,
+        .traced = &tracing_executor,
+        .weights = try .init(arena.allocator(), 100),
+    };
+
+    const layer = try layer_gen.fullyConnected(&arena, 2, 1);
+    try optimizer.registerWeights(layer.weights);
+    try optimizer.registerWeights(layer.biases);
 
     const checkpoint = arena.checkpoint();
+    const math_checkpoint = tracing_executor.checkpoint();
+    const cl_alloc_checkpoint = cl_alloc.checkpoint();
 
-    var epoch_idx: usize = 0;
     while (true) {
-        defer epoch_idx += 1;
-
         arena.restore(checkpoint);
-        var loss = try TrackedF32.init(arena.allocator(), 0);
+        tracing_executor.restore(math_checkpoint);
+        cl_alloc.reset(cl_alloc_checkpoint);
 
-        for (0..1000) |_| {
-            const a = rand.float(f32);
-            const b = rand.float(f32);
-            const output = try net.run(arena.allocator(), a, b);
-
-            const expected = if (a > b)
-                try TrackedF32.init(arena.allocator(), 1)
-            else
-                try TrackedF32.init(arena.allocator(), 0);
-
-            const this_loss = try TrackedF32.pow(
-                arena.allocator(),
-                try TrackedF32.sub(arena.allocator(), output, expected),
-                2,
-            );
-
-            loss = try TrackedF32.add(arena.allocator(), this_loss, loss);
+        const batch_size = 1000;
+        const batch_cpu = try arena.allocator().alloc(f32, batch_size * 2);
+        for (batch_cpu) |*elem| {
+            elem.* = rand.float(f32);
         }
 
-        loss.backprop(1.0);
+        const batch = try tracing_executor.createTensorUntracked(&cl_alloc, batch_cpu, &.{ batch_size, 2 });
+        const results_a = try layer.execute(&cl_alloc, batch);
+        const results = try tracing_executor.reshape(&cl_alloc, results_a, &.{batch_size});
 
-        if (epoch_idx % 1000 == 0) {
-            std.debug.print("loss: {d}\n", .{loss.val});
-            std.debug.print("{any}\n", .{net});
+        const res_cpu = try tracing_executor.toCpu(arena.allocator(), &cl_alloc, results);
+
+        const expected = try tracing_executor.gt(&cl_alloc, batch, 1);
+        const loss = try tracing_executor.squaredErr(&cl_alloc, expected, results);
+
+        const expected_cpu = try tracing_executor.toCpu(arena.allocator(), &cl_alloc, expected);
+        //tracing_executor.printBackwards(loss.buf, 0);
+
+        const gradients = try tracing_executor.backprop(&cl_alloc, loss.buf);
+
+        var correct: usize = 0;
+
+        for (0..res_cpu.len) |i| {
+            if ((res_cpu[i] > 0.5) == (expected_cpu[i] > 0.5)) correct += 1;
         }
 
-        if (std.math.isNan(loss.val)) {
-            net.clearGrad();
-            continue;
-        }
+        try optimizer.optimize(&cl_alloc, gradients);
+        try cl_executor.finish();
 
-        net.optimize();
+        std.debug.print("{any}/{d} correct\n", .{ correct, batch_size });
     }
+}
+
+test {
+    _ = std.testing.refAllDeclsRecursive(@This());
 }
