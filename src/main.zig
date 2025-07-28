@@ -1,30 +1,32 @@
 const std = @import("std");
 const sphtud = @import("sphtud");
 
-const Operation = enum {
+const TwoParam = struct {
+    in1: *TrackedF32,
+    in2: *TrackedF32,
+};
+const Operation = union(enum) {
     init,
-    add,
-    sub,
-    mul,
-    sigmoid,
-    pow,
+    add: TwoParam,
+    sub: TwoParam,
+    mul: TwoParam,
+    sigmoid: *TrackedF32,
+    pow: struct {
+        in1: *TrackedF32,
+        in2: f32,
+    },
 };
 
 const TrackedF32 = struct {
     val: f32,
     op: Operation,
     gradient: f32 = 0.0,
-    in1: ?*TrackedF32,
-    in2: ?*TrackedF32,
-    in2_raw: ?f32 = null,
 
     fn init(alloc: std.mem.Allocator, val: f32) !*TrackedF32 {
         const ret = try alloc.create(TrackedF32);
         ret.* = .{
             .val = val,
             .op = .init,
-            .in1 = null,
-            .in2 = null,
         };
         return ret;
     }
@@ -33,9 +35,12 @@ const TrackedF32 = struct {
         const ret = try alloc.create(TrackedF32);
         ret.* = .{
             .val = a.val + b.val,
-            .op = .add,
-            .in1 = a,
-            .in2 = b,
+            .op = .{
+                .add = .{
+                    .in1 = a,
+                    .in2 = b,
+                },
+            },
         };
         return ret;
     }
@@ -44,9 +49,12 @@ const TrackedF32 = struct {
         const ret = try alloc.create(TrackedF32);
         ret.* = .{
             .val = a.val - b.val,
-            .op = .sub,
-            .in1 = a,
-            .in2 = b,
+            .op = .{
+                .sub = .{
+                    .in1 = a,
+                    .in2 = b,
+                },
+            },
         };
         return ret;
     }
@@ -55,9 +63,12 @@ const TrackedF32 = struct {
         const ret = try alloc.create(TrackedF32);
         ret.* = .{
             .val = a.val * b.val,
-            .op = .mul,
-            .in1 = a,
-            .in2 = b,
+            .op = .{
+                .mul = .{
+                    .in1 = a,
+                    .in2 = b,
+                },
+            },
         };
         return ret;
     }
@@ -66,9 +77,7 @@ const TrackedF32 = struct {
         const ret = try alloc.create(TrackedF32);
         ret.* = .{
             .val = 1.0 / (1.0 + std.math.exp(-a.val)),
-            .op = .sigmoid,
-            .in1 = a,
-            .in2 = null,
+            .op = .{ .sigmoid = a },
         };
         return ret;
     }
@@ -77,10 +86,12 @@ const TrackedF32 = struct {
         const ret = try alloc.create(TrackedF32);
         ret.* = .{
             .val = std.math.pow(f32, a.val, b),
-            .op = .pow,
-            .in1 = a,
-            .in2 = null,
-            .in2_raw = b,
+            .op = .{
+                .pow = .{
+                    .in1 = a,
+                    .in2 = b,
+                },
+            },
         };
         return ret;
     }
@@ -88,49 +99,49 @@ const TrackedF32 = struct {
     fn backprop(self: *TrackedF32, downstream_gradient: f32) void {
         switch (self.op) {
             .init => return,
-            .add => {
+            .add => |params| {
                 const in1_grad = 1.0 * downstream_gradient;
                 const in2_grad = 1.0 * downstream_gradient;
 
-                self.in1.?.gradient += in1_grad;
-                self.in2.?.gradient += in2_grad;
+                params.in1.gradient += in1_grad;
+                params.in2.gradient += in2_grad;
 
-                self.in1.?.backprop(in1_grad);
-                self.in2.?.backprop(in2_grad);
+                params.in1.backprop(in1_grad);
+                params.in2.backprop(in2_grad);
             },
-            .mul => {
-                const in1_grad = self.in2.?.val * downstream_gradient;
-                const in2_grad = self.in1.?.val * downstream_gradient;
+            .mul => |params| {
+                const in1_grad = params.in2.val * downstream_gradient;
+                const in2_grad = params.in1.val * downstream_gradient;
 
-                self.in1.?.gradient += in1_grad;
-                self.in2.?.gradient += in2_grad;
+                params.in1.gradient += in1_grad;
+                params.in2.gradient += in2_grad;
 
-                self.in1.?.backprop(in1_grad);
-                self.in2.?.backprop(in2_grad);
+                params.in1.backprop(in1_grad);
+                params.in2.backprop(in2_grad);
             },
-            .pow => {
-                const grad = self.in1.?.val * self.in2_raw.? * downstream_gradient;
-                self.in1.?.gradient += grad;
-                self.in1.?.backprop(grad);
+            .pow => |params| {
+                const grad = params.in1.val * params.in2 * downstream_gradient;
+                params.in1.gradient += grad;
+                params.in1.backprop(grad);
             },
-            .sub => {
+            .sub => |params| {
                 const in1_grad = 1.0 * downstream_gradient;
                 const in2_grad = -1.0 * downstream_gradient;
 
-                self.in1.?.gradient += in1_grad;
-                self.in2.?.gradient += in2_grad;
+                params.in1.gradient += in1_grad;
+                params.in2.gradient += in2_grad;
 
-                self.in1.?.backprop(in1_grad);
-                self.in2.?.backprop(in2_grad);
+                params.in1.backprop(in1_grad);
+                params.in2.backprop(in2_grad);
             },
-            .sigmoid => {
-                const x = self.in1.?.val;
+            .sigmoid => |input| {
+                const x = input.val;
                 const enx = std.math.exp(-x);
                 const enxp1 = (enx + 1);
 
                 const grad = enx / enxp1 / enxp1 * downstream_gradient;
-                self.in1.?.gradient += grad;
-                self.in1.?.backprop(grad);
+                input.gradient += grad;
+                input.backprop(grad);
             },
         }
     }
