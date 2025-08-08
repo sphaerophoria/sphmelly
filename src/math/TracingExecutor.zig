@@ -72,6 +72,13 @@ pub fn createTensorUntracked(self: *TracingExecutor, cl_alloc: *cl.Alloc, initia
     );
 }
 
+pub fn rand(self: *TracingExecutor, cl_alloc: *cl.Alloc, dims_in: anytype, source: *math.RandSource) !Tensor {
+    return try self.appendNode(
+        try self.inner.rand(cl_alloc, dims_in, source),
+        .init,
+    );
+}
+
 pub fn toCpu(self: *TracingExecutor, alloc: std.mem.Allocator, scratch_cl: *cl.Alloc, tensor: Tensor) ![]f32 {
     return self.inner.toCpu(alloc, scratch_cl, self.getClTensor(tensor.buf));
 }

@@ -163,12 +163,14 @@ pub const Executor = struct {
             local_mem: u32,
             buf: Buffer,
             uint: u32,
+            ulong: u64,
             float: f32,
 
             pub fn size(self: Arg) cl.cl_uint {
                 switch (self) {
                     .buf => return @sizeOf(cl.cl_mem),
                     .uint => return @sizeOf(u32),
+                    .ulong => return @sizeOf(u64),
                     .float => return @sizeOf(f32),
                     .local_mem => |s| return s,
                 }
@@ -178,6 +180,7 @@ pub const Executor = struct {
                 switch (self.*) {
                     .buf => |*b| return @ptrCast(&b.buf),
                     .uint => |*u| return u,
+                    .ulong => |*u| return u,
                     .float => |*f| return f,
                     .local_mem => return null,
                 }

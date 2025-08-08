@@ -12,6 +12,7 @@ const add_splat_program_content = @embedFile("add_splat.cl");
 const gt_program_content = @embedFile("gt.cl");
 const squared_err_program_content = @embedFile("squared_err.cl");
 const mul_program_content = @embedFile("mul.cl");
+const rand_program_content = @embedFile("rand.cl");
 
 matmul_kernel: cl.Executor.Kernel,
 matmul_grad_a_kernel: cl.Executor.Kernel,
@@ -25,6 +26,9 @@ squared_err_kernel: cl.Executor.Kernel,
 squared_err_grad_kernel: cl.Executor.Kernel,
 add_assign_kernel: cl.Executor.Kernel,
 mul_scalar_kernel: cl.Executor.Kernel,
+rand_kernel: cl.Executor.Kernel,
+gaussian_kernel: cl.Executor.Kernel,
+gaussian_noise_kernel: cl.Executor.Kernel,
 executor: cl.Executor,
 
 pub fn init(cl_alloc: *cl.Alloc, executor: cl.Executor) !Executor {
@@ -54,6 +58,11 @@ pub fn init(cl_alloc: *cl.Alloc, executor: cl.Executor) !Executor {
     const squared_err_kernel = try squared_err_program.createKernel(cl_alloc, "squared_err");
     const squared_err_grad_kernel = try squared_err_program.createKernel(cl_alloc, "squared_err_grad");
 
+    const rand_program = try executor.createProgram(cl_alloc, rand_program_content);
+    const rand_kernel = try rand_program.createKernel(cl_alloc, "rand");
+    const gaussian_kernel = try rand_program.createKernel(cl_alloc, "gaussian");
+    const gaussian_noise_kernel = try rand_program.createKernel(cl_alloc, "gaussian_noise");
+
     return .{
         .matmul_kernel = matmul_kernel,
         .matmul_grad_a_kernel = matmul_grad_a_kernel,
@@ -67,6 +76,9 @@ pub fn init(cl_alloc: *cl.Alloc, executor: cl.Executor) !Executor {
         .squared_err_grad_kernel = squared_err_grad_kernel,
         .add_assign_kernel = add_assign_kernel,
         .mul_scalar_kernel = mul_scalar_kernel,
+        .rand_kernel = rand_kernel,
+        .gaussian_kernel = gaussian_kernel,
+        .gaussian_noise_kernel = gaussian_noise_kernel,
         .executor = executor,
     };
 }
@@ -112,6 +124,70 @@ pub fn reshape(_: Executor, cl_alloc: *cl.Alloc, val: Tensor, new_dims_in: anyty
     return .{
         .buf = val.buf,
         .dims = new_dims,
+    };
+}
+
+pub fn rand(self: Executor, cl_alloc: *cl.Alloc, dims_in: anytype, source: *math.RandSource) !Tensor {
+    const out_dims = try math.TensorDims.init(cl_alloc.heap(), dims_in);
+
+    const ret = try self.executor.createBuffer(cl_alloc, .read_write, out_dims.byteSize());
+
+    const n = out_dims.numElems();
+    try executeKernel(self.executor, self.rand_kernel, n, &.{
+        .{ .buf = ret },
+        .{ .ulong = source.ctr },
+        .{ .uint = source.seed },
+        .{ .uint = n },
+    });
+
+    source.ctr += n;
+
+    return .{
+        .buf = ret,
+        .dims = out_dims,
+    };
+}
+
+pub fn randGaussian(self: Executor, cl_alloc: *cl.Alloc, dims_in: anytype, source: *math.RandSource) !Tensor {
+    const out_dims = try math.TensorDims.init(cl_alloc.heap(), dims_in);
+
+    const ret = try self.executor.createBuffer(cl_alloc, .read_write, out_dims.byteSize());
+
+    const n = out_dims.numElems();
+    try executeKernel(self.executor, self.gaussian_kernel, n, &.{
+        .{ .buf = ret },
+        .{ .ulong = source.ctr },
+        .{ .uint = source.seed },
+        .{ .uint = n },
+    });
+
+    // Box muller algo uses 2 PRNG uniform inputs per 2 outputs, however our
+    // impl discards the second one, resulting in 2 consumed numbers per number
+    source.ctr += 2 * n;
+
+    return .{
+        .buf = ret,
+        .dims = out_dims,
+    };
+}
+
+pub fn gaussianNoise(self: Executor, cl_alloc: *cl.Alloc, input: Tensor, seed: u32, start_count: u64) !Tensor {
+    const out_dims = try input.dims.clone(cl_alloc.heap());
+
+    const ret = try self.executor.createBuffer(cl_alloc, .read_write, out_dims.byteSize());
+
+    const n = out_dims.numElems();
+    try executeKernel(self.executor, self.gaussian_noise_kernel, n, &.{
+        .{ .buf = input.buf },
+        .{ .buf = ret },
+        .{ .ulong = start_count },
+        .{ .uint = seed },
+        .{ .uint = n },
+    });
+
+    return .{
+        .buf = ret,
+        .dims = out_dims,
     };
 }
 
@@ -425,9 +501,10 @@ const ClExecutorFixture = struct {
     cl_alloc: cl.Alloc,
     executor: cl.Executor,
     cl_math: Executor,
+    rand_source: math.RandSource,
 
     fn init() !ClExecutorFixture {
-        const buf = try std.heap.page_allocator.alloc(u8, 1 * 1024 * 1024);
+        const buf = try std.heap.page_allocator.alloc(u8, 10 * 1024 * 1024);
 
         const executor = try cl.Executor.init();
         errdefer executor.deinit();
@@ -442,6 +519,10 @@ const ClExecutorFixture = struct {
             .executor = executor,
             .cl_math = cl_math,
             .cl_alloc = cl_alloc,
+            .rand_source = .{
+                .ctr = 0,
+                .seed = 0,
+            },
         };
     }
 
@@ -826,4 +907,99 @@ test "squaredErrGrad" {
     for (expected_b, b_grad_cpu) |ec, ac| {
         try std.testing.expectApproxEqAbs(ec, ac, 0.001);
     }
+}
+
+fn calcChiSquared(actual_buckets: []const usize, expected_buckets: []const usize) f32 {
+    std.debug.assert(actual_buckets.len == expected_buckets.len);
+
+    var chi2: f32 = 0;
+
+    for (actual_buckets, expected_buckets) |actual, expected| {
+        const expected_f: f32 = @floatFromInt(expected);
+        const actual_f: f32 = @floatFromInt(actual);
+        var num = actual_f - expected_f;
+        num *= num;
+        num /= expected_f;
+        chi2 += num;
+    }
+
+    return chi2;
+}
+
+// Empirically, our rng seems to be a "bad" fit for a uniform distribution
+// Graphing a histogram of returned numbers manually, we see a "box" of
+// numbers that are relatively flat, but with fairly high variance in Y (1%)
+//
+// AFAICT, this means that the chi2 stat will indicate that we are not a
+// great fit. Which is true. HOWEVER if we plot a completely wrong curve
+// (i.e. gaussian shifted into [0,1) range we get a very very different
+// chi2 number (like 700k vs 1k)
+//
+// This indicates to me that this is still a valuable stat, but expecting
+// an actual good fit is unreasonable. Testing our values against the zig
+// default PRNG gives similar results (with 1M numbers 1104 for zig, 1107
+// for us)
+//
+// Instead of picking a fit number from a chi2 table and probability value,
+// just check that we are still within some reasonable value that we
+// previously measured :)
+const chi2_threshold = 1110.0;
+
+test "rand" {
+    var fixture = try ClExecutorFixture.init();
+    defer fixture.deinit();
+
+    const num_nums = 1000000;
+    const numbers_gpu = try fixture.cl_math.rand(&fixture.cl_alloc, &.{num_nums}, &fixture.rand_source);
+    const numbers_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, numbers_gpu);
+
+    const num_buckets = 1000;
+    const expected: [num_buckets]usize = @splat(num_nums / num_buckets);
+    var actual: [num_buckets]usize = @splat(0);
+    for (numbers_cpu) |num| {
+        const bucket_idx: usize = @intFromFloat(num * num_buckets);
+        actual[bucket_idx] += 1;
+    }
+
+    const chi2 = calcChiSquared(&actual, &expected);
+    try std.testing.expect(chi2 < chi2_threshold);
+}
+
+pub fn normalDistAt(x: f32) f32 {
+    //https://en.wikipedia.org/wiki/Normal_distribution
+    return std.math.exp(-(x * x) / 2) / std.math.sqrt(2 * std.math.pi);
+}
+
+test "gaussian" {
+    var fixture = try ClExecutorFixture.init();
+    defer fixture.deinit();
+
+    const num_nums = 1000000;
+    const numbers_gpu = try fixture.cl_math.randGaussian(&fixture.cl_alloc, &.{num_nums}, &fixture.rand_source);
+    const numbers_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, numbers_gpu);
+
+    const num_buckets = 1000;
+    var expected: [num_buckets]usize = undefined;
+    var expected_sum: usize = 0;
+
+    for (0..num_buckets) |i| {
+        // [0, num_buckets] -> [-3, 3]
+        // i * 6 / num_buckets - 3
+        const i_f: f32 = @floatFromInt(i);
+        const x = i_f * 6 / num_buckets - 3;
+        expected[i] = @intFromFloat(@round(normalDistAt(x) * 6.0 / num_buckets * num_nums));
+        expected_sum += expected[i];
+    }
+
+    var actual: [num_buckets]usize = @splat(0);
+    for (numbers_cpu) |num| {
+        // [-3, 3] -> [0, num_buckets]
+        const bucket_idx_f: f32 = (num + 3) / 6 * num_buckets;
+        if (bucket_idx_f >= num_buckets or bucket_idx_f < 0) continue;
+        const bucket_idx: usize = @intFromFloat(bucket_idx_f);
+        actual[bucket_idx] += 1;
+    }
+
+    const chi2 = calcChiSquared(&actual, &expected);
+    try std.testing.expect(chi2 < chi2_threshold);
 }

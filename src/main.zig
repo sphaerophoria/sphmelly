@@ -65,7 +65,7 @@ const Optimizer = struct {
     }
 
     fn optimize(self: Optimizer, cl_alloc: *cl.Alloc, gradients: math.TracingExecutor.Gradients) !void {
-        const lr = 0.001;
+        const lr = 0.00001;
 
         for (self.weights.items) |item| {
             const item_grad = gradients.get(item.buf);
@@ -85,10 +85,8 @@ pub fn main() !void {
     var cl_alloc = try cl.Alloc.init(try arena.allocator().alloc(u8, 1 * 1024 * 1024));
     defer cl_alloc.deinit();
 
-    var rng = std.Random.DefaultPrng.init(0);
-    var rand = rng.random();
-
     const math_executor = try math.Executor.init(&cl_alloc, cl_executor);
+
     var tracing_executor = try math.TracingExecutor.init(math_executor, arena.allocator(), 100);
 
     const layer_gen = OpenClLayerGen(math.TracingExecutor){
@@ -110,18 +108,19 @@ pub fn main() !void {
     const math_checkpoint = tracing_executor.checkpoint();
     const cl_alloc_checkpoint = cl_alloc.checkpoint();
 
+    var rand_source = math.RandSource{
+        .ctr = 0,
+        .seed = 0,
+    };
+
     while (true) {
         arena.restore(checkpoint);
         tracing_executor.restore(math_checkpoint);
         cl_alloc.reset(cl_alloc_checkpoint);
 
-        const batch_size = 1000;
-        const batch_cpu = try arena.allocator().alloc(f32, batch_size * 2);
-        for (batch_cpu) |*elem| {
-            elem.* = rand.float(f32);
-        }
+        const batch_size = 1000000;
+        const batch = try tracing_executor.rand(&cl_alloc, &.{ batch_size, 2 }, &rand_source);
 
-        const batch = try tracing_executor.createTensorUntracked(&cl_alloc, batch_cpu, &.{ batch_size, 2 });
         const results_a = try layer.execute(&cl_alloc, batch);
         const results = try tracing_executor.reshape(&cl_alloc, results_a, &.{batch_size});
 

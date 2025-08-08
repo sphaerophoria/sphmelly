@@ -83,3 +83,8 @@ pub fn Tensor(comptime Store: type) type {
         dims: TensorDims,
     };
 }
+
+pub const RandSource = struct {
+    seed: u32,
+    ctr: u64,
+};
