@@ -247,7 +247,7 @@ pub const Executor = struct {
             var log: [4096]u8 = undefined;
             var log_len: usize = 0;
             _ = cl.clGetProgramBuildInfo(program, self.device, cl.CL_PROGRAM_BUILD_LOG, log.len, &log, &log_len);
-            std.debug.print("{s}\n", .{log[0..log_len]});
+            std.debug.print("{s}\n", .{log[0..@min(log_len, log.len)]});
 
             return e;
         };
@@ -311,12 +311,12 @@ pub const Executor = struct {
         };
     }
 
-    pub fn readBufferUntracked(self: Executor, buf: Buffer, out: []u8) !void {
+    pub fn readBufferUntracked(self: Executor, buf: Buffer, offset: usize, out: []u8) !void {
         try clError(cl.clEnqueueReadBuffer(
             self.queue,
             buf.buf,
             cl.CL_FALSE,
-            0,
+            offset,
             out.len,
             out.ptr,
             0,
@@ -325,13 +325,13 @@ pub const Executor = struct {
         ));
     }
 
-    pub fn readBuffer(self: Executor, alloc: *Alloc, buf: Buffer, out: []u8) !Event {
+    pub fn readBuffer(self: Executor, alloc: *Alloc, buf: Buffer, offset: usize, out: []u8) !Event {
         var event: cl.cl_event = undefined;
         try clError(cl.clEnqueueReadBuffer(
             self.queue,
             buf.buf,
             cl.CL_FALSE,
-            0,
+            offset,
             out.len,
             out.ptr,
             0,
@@ -347,8 +347,8 @@ pub const Executor = struct {
         };
     }
 
-    pub fn executeKernelUntracked(self: Executor, kernel: Kernel, num_elems: usize) !void {
-        const params = try self.getKernelParams(kernel, num_elems);
+    pub fn executeKernelUntracked(self: Executor, kernel: Kernel, num_elems: usize, args: []const Kernel.Arg) !void {
+        const params = try self.prepareKernel(kernel, num_elems, args);
 
         try clError(cl.clEnqueueNDRangeKernel(
             self.queue,
@@ -363,8 +363,8 @@ pub const Executor = struct {
         ));
     }
 
-    pub fn executeKernel(self: Executor, alloc: *Alloc, kernel: Kernel, num_elems: usize) !Event {
-        const params = try self.getKernelParams(kernel, num_elems);
+    pub fn executeKernel(self: Executor, alloc: *Alloc, kernel: Kernel, num_elems: usize, args: []const Kernel.Arg) !Event {
+        const params = try self.prepareKernel(kernel, num_elems, args);
 
         var event: cl.cl_event = undefined;
         try clError(cl.clEnqueueNDRangeKernel(
@@ -396,10 +396,15 @@ pub const Executor = struct {
         wait_event_list: [*c]const cl.cl_event = null,
     };
 
-    fn getKernelParams(self: Executor, kernel: Kernel, num_elems: usize) !KernelParams {
+    fn prepareKernel(self: Executor, kernel: Kernel, num_elems: usize, args: []const Kernel.Arg) !KernelParams {
         const local_size = try self.getKernelLocalSize(kernel);
 
         const global_size = roundUp(usize, num_elems, local_size);
+
+        for (args, 0..) |arg, i| {
+            try kernel.setArg(@intCast(i), arg);
+        }
+
         return .{
             .global_size = global_size,
             .local_size = local_size,

@@ -65,6 +65,31 @@ float ulongToFloat(ulong val) {
     return ret.f;
 }
 
+struct philox_thread_rng {
+    ulong ctr;
+    uint seed;
+};
+
+struct philox_thread_rng rngInit(ulong ctr, uint seed) {
+  // Make a new rng based off the output of this one. This way if we have
+  // sequential RNG accesses we don't have to do anything special
+  return (struct philox_thread_rng) { 0, philox2x32(ctr, seed), };
+}
+
+ulong rngGenerate(struct philox_thread_rng* rng) {
+    return philox2x32(rng->ctr++, rng->seed);
+}
+
+float randFloatBetween(struct philox_thread_rng* rng, float min, float max) {
+    float t = ulongToFloat(rngGenerate(rng));
+    return t * (max - min) + min;
+}
+
+ulong randUlongBetween(struct philox_thread_rng* rng, ulong min, ulong max) {
+    return rngGenerate(rng) % (max - min) + min;
+}
+
+
 __kernel void rand(
         __global float* output,
         ulong initial_ctr,

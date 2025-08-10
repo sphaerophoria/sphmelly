@@ -5,14 +5,15 @@ const math = @import("../math.zig");
 pub const Tensor = math.Tensor(cl.Executor.Buffer);
 const Executor = @This();
 
-const sum_program_content = @embedFile("sum.cl");
-const matmul_program_content = @embedFile("matmul.cl");
-const sigmoid_program_content = @embedFile("sigmoid.cl");
-const add_splat_program_content = @embedFile("add_splat.cl");
-const gt_program_content = @embedFile("gt.cl");
-const squared_err_program_content = @embedFile("squared_err.cl");
-const mul_program_content = @embedFile("mul.cl");
-const rand_program_content = @embedFile("rand.cl");
+pub const sum_program_content = @embedFile("sum.cl");
+pub const matmul_program_content = @embedFile("matmul.cl");
+pub const sigmoid_program_content = @embedFile("sigmoid.cl");
+pub const add_splat_program_content = @embedFile("add_splat.cl");
+pub const gt_program_content = @embedFile("gt.cl");
+pub const squared_err_program_content = @embedFile("squared_err.cl");
+pub const mul_program_content = @embedFile("mul.cl");
+pub const rand_program_content = @embedFile("rand.cl");
+pub const conv_program_content = @embedFile("conv.cl");
 
 matmul_kernel: cl.Executor.Kernel,
 matmul_grad_a_kernel: cl.Executor.Kernel,
@@ -29,6 +30,7 @@ mul_scalar_kernel: cl.Executor.Kernel,
 rand_kernel: cl.Executor.Kernel,
 gaussian_kernel: cl.Executor.Kernel,
 gaussian_noise_kernel: cl.Executor.Kernel,
+masked_conv_kernel: cl.Executor.Kernel,
 executor: cl.Executor,
 
 pub fn init(cl_alloc: *cl.Alloc, executor: cl.Executor) !Executor {
@@ -63,6 +65,9 @@ pub fn init(cl_alloc: *cl.Alloc, executor: cl.Executor) !Executor {
     const gaussian_kernel = try rand_program.createKernel(cl_alloc, "gaussian");
     const gaussian_noise_kernel = try rand_program.createKernel(cl_alloc, "gaussian_noise");
 
+    const conv_program = try executor.createProgram(cl_alloc, conv_program_content);
+    const masked_conv_kernel = try conv_program.createKernel(cl_alloc, "masked_conv");
+
     return .{
         .matmul_kernel = matmul_kernel,
         .matmul_grad_a_kernel = matmul_grad_a_kernel,
@@ -79,6 +84,7 @@ pub fn init(cl_alloc: *cl.Alloc, executor: cl.Executor) !Executor {
         .rand_kernel = rand_kernel,
         .gaussian_kernel = gaussian_kernel,
         .gaussian_noise_kernel = gaussian_noise_kernel,
+        .masked_conv_kernel = masked_conv_kernel,
         .executor = executor,
     };
 }
@@ -90,7 +96,7 @@ pub fn addAssign(self: Executor, a: Tensor, b: Tensor) !void {
     }
 
     const n = a.dims.numElems();
-    try executeKernel(self.executor, self.add_assign_kernel, n, &.{
+    try self.executor.executeKernelUntracked(self.add_assign_kernel, n, &.{
         .{ .buf = a.buf },
         .{ .buf = b.buf },
         .{ .uint = n },
@@ -101,7 +107,7 @@ pub fn mulScalar(self: Executor, cl_alloc: *cl.Alloc, a: Tensor, b: f32) !Tensor
     const ret = try self.createTensorUninitialized(cl_alloc, a.dims);
     const n = a.dims.numElems();
 
-    try executeKernel(self.executor, self.mul_scalar_kernel, n, &.{
+    try self.executor.executeKernelUntracked(self.mul_scalar_kernel, n, &.{
         .{ .buf = a.buf },
         .{ .float = b },
         .{ .buf = ret.buf },
@@ -133,7 +139,7 @@ pub fn rand(self: Executor, cl_alloc: *cl.Alloc, dims_in: anytype, source: *math
     const ret = try self.executor.createBuffer(cl_alloc, .read_write, out_dims.byteSize());
 
     const n = out_dims.numElems();
-    try executeKernel(self.executor, self.rand_kernel, n, &.{
+    try self.executor.executeKernelUntracked(self.rand_kernel, n, &.{
         .{ .buf = ret },
         .{ .ulong = source.ctr },
         .{ .uint = source.seed },
@@ -154,7 +160,7 @@ pub fn randGaussian(self: Executor, cl_alloc: *cl.Alloc, dims_in: anytype, sourc
     const ret = try self.executor.createBuffer(cl_alloc, .read_write, out_dims.byteSize());
 
     const n = out_dims.numElems();
-    try executeKernel(self.executor, self.gaussian_kernel, n, &.{
+    try self.executor.executeKernelUntracked(self.gaussian_kernel, n, &.{
         .{ .buf = ret },
         .{ .ulong = source.ctr },
         .{ .uint = source.seed },
@@ -177,7 +183,7 @@ pub fn gaussianNoise(self: Executor, cl_alloc: *cl.Alloc, input: Tensor, seed: u
     const ret = try self.executor.createBuffer(cl_alloc, .read_write, out_dims.byteSize());
 
     const n = out_dims.numElems();
-    try executeKernel(self.executor, self.gaussian_noise_kernel, n, &.{
+    try self.executor.executeKernelUntracked(self.gaussian_noise_kernel, n, &.{
         .{ .buf = input.buf },
         .{ .buf = ret },
         .{ .ulong = start_count },
@@ -208,7 +214,7 @@ pub fn gt(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, dim: u32) !Tensor {
     const ret = try self.executor.createBuffer(cl_alloc, .read_write, out_dims.byteSize());
 
     const n = out_dims.numElems();
-    try executeKernel(self.executor, self.gt_kernel, n, &.{
+    try self.executor.executeKernelUntracked(self.gt_kernel, n, &.{
         .{ .buf = in.buf },
         .{ .uint = stride },
         .{ .buf = ret },
@@ -230,7 +236,7 @@ pub fn squaredErr(self: *Executor, cl_alloc: *cl.Alloc, a: Tensor, b: Tensor) !T
     const ret = try self.executor.createBuffer(cl_alloc, .read_write, a.dims.byteSize());
 
     const n = a.dims.numElems();
-    try executeKernel(self.executor, self.squared_err_kernel, n, &.{
+    try self.executor.executeKernelUntracked(self.squared_err_kernel, n, &.{
         .{ .buf = a.buf },
         .{ .buf = b.buf },
         .{ .buf = ret },
@@ -252,7 +258,7 @@ pub fn squaredErrGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_grad: Tens
     const b_grad = try self.createTensorUninitialized(cl_alloc, a.dims);
 
     const n = a.dims.numElems();
-    try executeKernel(self.executor, self.squared_err_grad_kernel, n, &.{
+    try self.executor.executeKernelUntracked(self.squared_err_grad_kernel, n, &.{
         .{ .buf = downstream_grad.buf },
         .{ .buf = a.buf },
         .{ .buf = b.buf },
@@ -264,6 +270,36 @@ pub fn squaredErrGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_grad: Tens
     return .{
         a_grad, b_grad,
     };
+}
+
+pub fn maskedConv(self: Executor, cl_alloc: *cl.Alloc, img: Tensor, mask: Tensor, img_kernels: Tensor) !Tensor {
+    if (!img.dims.eql(mask.dims)) {
+        return error.InvalidDims;
+    }
+
+    if (img.dims.len() != 3 or img.dims.get(2) != img_kernels.dims.get(2)) {
+        return error.InvalidDims;
+    }
+
+    if (img_kernels.dims.len() != 3 or img_kernels.dims.get(0) != img_kernels.dims.get(1) or img_kernels.dims.get(0) % 2 != 1) {
+        return error.InvalidDims;
+    }
+
+    const ret = try self.createTensorUninitialized(cl_alloc, img.dims);
+
+    const n = img.dims.numElems();
+    try self.executor.executeKernelUntracked(self.masked_conv_kernel, n, &.{
+        .{ .buf = img.buf },
+        .{ .buf = mask.buf },
+        .{ .buf = ret.buf },
+        .{ .uint = img.dims.get(0) },
+        .{ .uint = img.dims.get(1) },
+        .{ .uint = n },
+        .{ .buf = img_kernels.buf },
+        .{ .uint = img_kernels.dims.get(0) },
+    });
+
+    return ret;
 }
 
 const TensorRes = struct {
@@ -304,6 +340,17 @@ pub fn createTensorUninitialized(self: Executor, cl_alloc: *cl.Alloc, dims_in: a
     };
 }
 
+pub fn createTensorFilled(self: Executor, cl_alloc: *cl.Alloc, dims_in: anytype, val: f32) !Tensor {
+    const dims = try math.TensorDims.init(cl_alloc.heap(), dims_in);
+    const buf = try self.executor.createBuffer(cl_alloc, .read_write, dims.byteSize());
+    try self.executor.fillBuffer(buf, val, dims.byteSize());
+
+    return .{
+        .buf = buf,
+        .dims = dims,
+    };
+}
+
 const TensorCommonParams = struct {
     dims: math.TensorDims,
     buf: cl.Executor.Buffer,
@@ -336,7 +383,7 @@ pub fn addSplatHorizontal(self: Executor, cl_alloc: *cl.Alloc, a: Tensor, b: Ten
     const out = try self.executor.createBuffer(cl_alloc, .read_write, b.dims.byteSize());
 
     const n = b.dims.numElems();
-    try executeKernel(self.executor, self.add_splat_kernel, n, &.{
+    try self.executor.executeKernelUntracked(self.add_splat_kernel, n, &.{
         .{ .buf = a.buf },
         .{ .buf = b.buf },
         .{ .uint = b.dims.get(0) },
@@ -366,7 +413,7 @@ pub fn addSplatHorizontalGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_gr
     const a_grads = try self.createTensorUninitialized(cl_alloc, a.dims);
 
     const n = a.dims.numElems();
-    try executeKernel(self.executor, self.add_splat_grad_a_kernel, n, &.{
+    try self.executor.executeKernelUntracked(self.add_splat_grad_a_kernel, n, &.{
         .{ .buf = downstream_gradients.buf },
         .{ .uint = downstream_gradients.dims.get(0) },
         .{ .buf = a.buf },
@@ -384,7 +431,7 @@ pub fn addSplatHorizontalGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_gr
 pub fn toCpu(self: Executor, alloc: std.mem.Allocator, scratch_cl: *cl.Alloc, tensor: Tensor) ![]f32 {
     const res_cpu = try alloc.alloc(f32, tensor.dims.numElems());
 
-    const event = try self.executor.readBuffer(scratch_cl, tensor.buf, std.mem.sliceAsBytes(res_cpu));
+    const event = try self.executor.readBuffer(scratch_cl, tensor.buf, 0, std.mem.sliceAsBytes(res_cpu));
     try event.wait();
 
     return res_cpu;
@@ -405,7 +452,7 @@ pub fn matmul(self: Executor, cl_alloc: *cl.Alloc, a: Tensor, b: Tensor) !Tensor
     const ret = try self.executor.createBuffer(cl_alloc, .read_write, out_dims.byteSize());
 
     const n = out_dims.numElems();
-    try executeKernel(self.executor, self.matmul_kernel, n, &.{
+    try self.executor.executeKernelUntracked(self.matmul_kernel, n, &.{
         .{ .buf = a.buf },
         .{ .uint = a.dims.get(0) },
         .{ .uint = a.dims.get(1) },
@@ -426,7 +473,7 @@ pub fn matmulGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_gradients: Ten
     const b_grad = try self.createTensorUninitialized(cl_alloc, b.dims);
 
     const a_n = a_grad.dims.numElems();
-    try executeKernel(self.executor, self.matmul_grad_a_kernel, a_n, &.{
+    try self.executor.executeKernelUntracked(self.matmul_grad_a_kernel, a_n, &.{
         .{ .buf = downstream_gradients.buf },
         .{ .buf = a.buf },
         .{ .uint = a.dims.get(0) },
@@ -437,7 +484,7 @@ pub fn matmulGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_gradients: Ten
     });
 
     const b_n = b_grad.dims.numElems();
-    try executeKernel(self.executor, self.matmul_grad_b_kernel, b_n, &.{
+    try self.executor.executeKernelUntracked(self.matmul_grad_b_kernel, b_n, &.{
         .{ .buf = downstream_gradients.buf },
         .{ .buf = a.buf },
         .{ .uint = a.dims.get(0) },
@@ -455,7 +502,7 @@ pub fn sigmoid(self: Executor, cl_alloc: *cl.Alloc, in: Tensor) !Tensor {
     const ret = try self.executor.createBuffer(cl_alloc, .read_write, in.dims.byteSize());
 
     const n = in.dims.numElems();
-    try executeKernel(self.executor, self.sigmoid_kernel, n, &.{
+    try self.executor.executeKernelUntracked(self.sigmoid_kernel, n, &.{
         .{ .buf = in.buf },
         .{ .buf = ret },
         .{ .uint = n },
@@ -475,7 +522,7 @@ pub fn sigmoidGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_grad: Tensor,
     const ret = try self.executor.createBuffer(cl_alloc, .read_write, in.dims.byteSize());
 
     const n = in.dims.numElems();
-    try executeKernel(self.executor, self.sigmoid_grad_kernel, n, &.{
+    try self.executor.executeKernelUntracked(self.sigmoid_grad_kernel, n, &.{
         .{ .buf = downstream_grad.buf },
         .{ .buf = in.buf },
         .{ .buf = ret },
@@ -486,14 +533,6 @@ pub fn sigmoidGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_grad: Tensor,
         .buf = ret,
         .dims = try in.dims.clone(cl_alloc.heap()),
     };
-}
-
-fn executeKernel(executor: cl.Executor, kernel: cl.Executor.Kernel, n: u32, args: []const cl.Executor.Kernel.Arg) !void {
-    for (args, 0..) |arg, i| {
-        try kernel.setArg(@intCast(i), arg);
-    }
-
-    try executor.executeKernelUntracked(kernel, n);
 }
 
 const ClExecutorFixture = struct {
@@ -597,7 +636,7 @@ test "matmul" {
     };
 
     var actual: [8]f32 = undefined;
-    const finish = try fixture.executor.readBuffer(&fixture.cl_alloc, c.buf, std.mem.sliceAsBytes(&actual));
+    const finish = try fixture.executor.readBuffer(&fixture.cl_alloc, c.buf, 0, std.mem.sliceAsBytes(&actual));
     try finish.wait();
 
     for (expected, actual) |ex, ac| {
@@ -678,7 +717,7 @@ test "sigmoid" {
     const out_gpu = try fixture.cl_math.sigmoid(&fixture.cl_alloc, in_gpu);
 
     var actual: [5]f32 = undefined;
-    const final = try fixture.executor.readBuffer(&fixture.cl_alloc, out_gpu.buf, std.mem.sliceAsBytes(&actual));
+    const final = try fixture.executor.readBuffer(&fixture.cl_alloc, out_gpu.buf, 0, std.mem.sliceAsBytes(&actual));
     try final.wait();
 
     const expected: []const f32 = &.{ 4.53978687e-05, 6.69285092e-03, 5.00000000e-01, 9.93307149e-01, 9.99954602e-01 };
@@ -749,7 +788,7 @@ test "addSplatHorizontal" {
 
     const actual_gpu = try fixture.cl_math.addSplatHorizontal(&fixture.cl_alloc, a, b);
     var actual: [16]f32 = undefined;
-    const final = try fixture.executor.readBuffer(&fixture.cl_alloc, actual_gpu.buf, std.mem.sliceAsBytes(&actual));
+    const final = try fixture.executor.readBuffer(&fixture.cl_alloc, actual_gpu.buf, 0, std.mem.sliceAsBytes(&actual));
     try final.wait();
 
     for (expected, actual) |ex, ac| {
