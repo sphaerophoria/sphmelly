@@ -3,11 +3,13 @@ const cl = @import("../cl.zig");
 const math = @import("../math.zig");
 
 pub const Tensor = math.Tensor(cl.Executor.Buffer);
+pub const TensorSlice = math.TensorSlice(cl.Executor.Buffer);
 const Executor = @This();
 
 pub const sum_program_content = @embedFile("sum.cl");
 pub const matmul_program_content = @embedFile("matmul.cl");
 pub const sigmoid_program_content = @embedFile("sigmoid.cl");
+pub const relu_program_content = @embedFile("relu.cl");
 pub const add_splat_program_content = @embedFile("add_splat.cl");
 pub const gt_program_content = @embedFile("gt.cl");
 pub const squared_err_program_content = @embedFile("squared_err.cl");
@@ -20,6 +22,8 @@ matmul_grad_a_kernel: cl.Executor.Kernel,
 matmul_grad_b_kernel: cl.Executor.Kernel,
 sigmoid_kernel: cl.Executor.Kernel,
 sigmoid_grad_kernel: cl.Executor.Kernel,
+relu_kernel: cl.Executor.Kernel,
+relu_grad_kernel: cl.Executor.Kernel,
 add_splat_kernel: cl.Executor.Kernel,
 add_splat_grad_a_kernel: cl.Executor.Kernel,
 gt_kernel: cl.Executor.Kernel,
@@ -31,6 +35,11 @@ rand_kernel: cl.Executor.Kernel,
 gaussian_kernel: cl.Executor.Kernel,
 gaussian_noise_kernel: cl.Executor.Kernel,
 masked_conv_kernel: cl.Executor.Kernel,
+conv_many_kernel: cl.Executor.Kernel,
+conv_many_grad_kernel_kernel: cl.Executor.Kernel,
+conv_many_grad_img_kernel: cl.Executor.Kernel,
+conv_many_make_grad_mirrored_kernel_kernel: cl.Executor.Kernel,
+transpose_kernel: cl.Executor.Kernel,
 executor: cl.Executor,
 
 pub fn init(cl_alloc: *cl.Alloc, executor: cl.Executor) !Executor {
@@ -41,14 +50,19 @@ pub fn init(cl_alloc: *cl.Alloc, executor: cl.Executor) !Executor {
     const matmul_kernel = try matmul_program.createKernel(cl_alloc, "matmul");
     const matmul_grad_a_kernel = try matmul_program.createKernel(cl_alloc, "matmul_grad_a");
     const matmul_grad_b_kernel = try matmul_program.createKernel(cl_alloc, "matmul_grad_b");
+    const transpose_kernel = try matmul_program.createKernel(cl_alloc, "transpose");
 
     const sigmoid_program = try executor.createProgram(cl_alloc, sigmoid_program_content);
     const sigmoid_kernel = try sigmoid_program.createKernel(cl_alloc, "sigmoid");
     const sigmoid_grad_kernel = try sigmoid_program.createKernel(cl_alloc, "sigmoid_grad");
 
+    const relu_program = try executor.createProgram(cl_alloc, relu_program_content);
+    const relu_kernel = try relu_program.createKernel(cl_alloc, "relu");
+    const relu_grad_kernel = try relu_program.createKernel(cl_alloc, "relu_grad");
+
     const add_splat_program = try executor.createProgram(cl_alloc, add_splat_program_content);
-    const add_splat_kernel = try add_splat_program.createKernel(cl_alloc, "add_splat_horizontal");
-    const add_splat_grad_a_kernel = try add_splat_program.createKernel(cl_alloc, "add_splat_horizontal_grad_a");
+    const add_splat_kernel = try add_splat_program.createKernel(cl_alloc, "add_splat_outer");
+    const add_splat_grad_a_kernel = try add_splat_program.createKernel(cl_alloc, "add_splat_outer_grad_a");
 
     const mul_program = try executor.createProgram(cl_alloc, mul_program_content);
     const mul_scalar_kernel = try mul_program.createKernel(cl_alloc, "mul_scalar");
@@ -67,13 +81,18 @@ pub fn init(cl_alloc: *cl.Alloc, executor: cl.Executor) !Executor {
 
     const conv_program = try executor.createProgram(cl_alloc, conv_program_content);
     const masked_conv_kernel = try conv_program.createKernel(cl_alloc, "masked_conv");
-
+    const conv_many_kernel = try conv_program.createKernel(cl_alloc, "conv_many");
+    const conv_many_grad_kernel_kernel = try conv_program.createKernel(cl_alloc, "conv_many_grad_kernel");
+    const conv_many_grad_img_kernel = try conv_program.createKernel(cl_alloc, "conv_many_grad_img");
+    const conv_many_make_grad_mirrored_kernel_kernel = try conv_program.createKernel(cl_alloc, "make_grad_mirrored_kernel");
     return .{
         .matmul_kernel = matmul_kernel,
         .matmul_grad_a_kernel = matmul_grad_a_kernel,
         .matmul_grad_b_kernel = matmul_grad_b_kernel,
         .sigmoid_kernel = sigmoid_kernel,
         .sigmoid_grad_kernel = sigmoid_grad_kernel,
+        .relu_kernel = relu_kernel,
+        .relu_grad_kernel = relu_grad_kernel,
         .add_splat_kernel = add_splat_kernel,
         .add_splat_grad_a_kernel = add_splat_grad_a_kernel,
         .gt_kernel = gt_kernel,
@@ -85,6 +104,11 @@ pub fn init(cl_alloc: *cl.Alloc, executor: cl.Executor) !Executor {
         .gaussian_kernel = gaussian_kernel,
         .gaussian_noise_kernel = gaussian_noise_kernel,
         .masked_conv_kernel = masked_conv_kernel,
+        .conv_many_kernel = conv_many_kernel,
+        .conv_many_grad_kernel_kernel = conv_many_grad_kernel_kernel,
+        .conv_many_grad_img_kernel = conv_many_grad_img_kernel,
+        .conv_many_make_grad_mirrored_kernel_kernel = conv_many_make_grad_mirrored_kernel_kernel,
+        .transpose_kernel = transpose_kernel,
         .executor = executor,
     };
 }
@@ -154,7 +178,7 @@ pub fn rand(self: Executor, cl_alloc: *cl.Alloc, dims_in: anytype, source: *math
     };
 }
 
-pub fn randGaussian(self: Executor, cl_alloc: *cl.Alloc, dims_in: anytype, source: *math.RandSource) !Tensor {
+pub fn randGaussian(self: Executor, cl_alloc: *cl.Alloc, dims_in: anytype, stddev: f32, source: *math.RandSource) !Tensor {
     const out_dims = try math.TensorDims.init(cl_alloc.heap(), dims_in);
 
     const ret = try self.executor.createBuffer(cl_alloc, .read_write, out_dims.byteSize());
@@ -165,6 +189,7 @@ pub fn randGaussian(self: Executor, cl_alloc: *cl.Alloc, dims_in: anytype, sourc
         .{ .ulong = source.ctr },
         .{ .uint = source.seed },
         .{ .uint = n },
+        .{ .float = stddev },
     });
 
     // Box muller algo uses 2 PRNG uniform inputs per 2 outputs, however our
@@ -203,13 +228,15 @@ pub fn gt(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, dim: u32) !Tensor {
     }
 
     const stride = in.dims.stride(dim);
-    const out_dims = try math.TensorDims.initEmpty(cl_alloc.heap(), in.dims.len() - 1);
+    const out_dims_slice: []u32 = try cl_alloc.heap().alloc(u32, in.dims.len() - 1);
     var out_dim_idx: usize = 0;
     for (0..in.dims.len()) |i| {
         if (i == dim) continue;
-        out_dims.getPtr(out_dim_idx).* = in.dims.get(i);
+        out_dims_slice[out_dim_idx] = in.dims.get(i);
         out_dim_idx += 1;
     }
+
+    const out_dims = math.TensorDims.initRef(out_dims_slice);
 
     const ret = try self.executor.createBuffer(cl_alloc, .read_write, out_dims.byteSize());
 
@@ -302,12 +329,14 @@ pub fn maskedConv(self: Executor, cl_alloc: *cl.Alloc, img: Tensor, mask: Tensor
     return ret;
 }
 
-const TensorRes = struct {
-    event: cl.Executor.Event,
-    val: Tensor,
-};
+pub fn Deferred(comptime T: type) type {
+    return struct {
+        event: cl.Executor.Event,
+        val: T,
+    };
+}
 
-pub fn createTensor(self: Executor, cl_alloc: *cl.Alloc, initial_data: []const f32, dims_in: []const u32) !TensorRes {
+pub fn createTensor(self: Executor, cl_alloc: *cl.Alloc, initial_data: []const f32, dims_in: []const u32) !Deferred(Tensor) {
     const params = try self.createTensorCommon(cl_alloc, initial_data, dims_in);
     const event = try self.executor.writeBuffer(cl_alloc, params.buf, std.mem.sliceAsBytes(initial_data));
 
@@ -371,14 +400,20 @@ pub fn createTensorCommon(self: Executor, cl_alloc: *cl.Alloc, initial_data: []c
     };
 }
 
-pub fn addSplatHorizontal(self: Executor, cl_alloc: *cl.Alloc, a: Tensor, b: Tensor) !Tensor {
-    if (a.dims.len() != 1) {
+fn validateAddSplatOuterDims(a: Tensor, b: Tensor) !void {
+    if (a.dims.len() != b.dims.len() - 1) {
         return error.InvalidDims;
     }
 
-    if (a.dims.get(0) != b.dims.get(1)) {
-        return error.InvalidDims;
+    for (a.dims.inner, b.dims.inner[0 .. b.dims.len() - 1]) |a_dim, b_dim| {
+        if (a_dim != b_dim) return error.InvalidDims;
     }
+}
+
+// Add a to b, where a matches b's shape, but with one smaller dimension, a
+// repeats for each element in b
+pub fn addSplatOuter(self: Executor, cl_alloc: *cl.Alloc, a: Tensor, b: Tensor) !Tensor {
+    try validateAddSplatOuterDims(a, b);
 
     const out = try self.executor.createBuffer(cl_alloc, .read_write, b.dims.byteSize());
 
@@ -386,7 +421,7 @@ pub fn addSplatHorizontal(self: Executor, cl_alloc: *cl.Alloc, a: Tensor, b: Ten
     try self.executor.executeKernelUntracked(self.add_splat_kernel, n, &.{
         .{ .buf = a.buf },
         .{ .buf = b.buf },
-        .{ .uint = b.dims.get(0) },
+        .{ .uint = a.dims.numElems() },
         .{ .buf = out },
         .{ .uint = n },
     });
@@ -397,14 +432,8 @@ pub fn addSplatHorizontal(self: Executor, cl_alloc: *cl.Alloc, a: Tensor, b: Ten
     };
 }
 
-pub fn addSplatHorizontalGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_gradients: Tensor, a: Tensor, b: Tensor) ![2]Tensor {
-    if (a.dims.len() != 1) {
-        return error.InvalidDims;
-    }
-
-    if (a.dims.get(0) != b.dims.get(1)) {
-        return error.InvalidDims;
-    }
+pub fn addSplatOuterGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_gradients: Tensor, a: Tensor, b: Tensor) ![2]Tensor {
+    try validateAddSplatOuterDims(a, b);
 
     if (!b.dims.eql(downstream_gradients.dims)) {
         return error.InvalidDims;
@@ -415,8 +444,9 @@ pub fn addSplatHorizontalGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_gr
     const n = a.dims.numElems();
     try self.executor.executeKernelUntracked(self.add_splat_grad_a_kernel, n, &.{
         .{ .buf = downstream_gradients.buf },
-        .{ .uint = downstream_gradients.dims.get(0) },
-        .{ .buf = a.buf },
+        .{
+            .uint = downstream_gradients.dims.numElems(),
+        },
         .{ .buf = a_grads.buf },
         .{ .uint = a.dims.numElems() },
     });
@@ -429,16 +459,41 @@ pub fn addSplatHorizontalGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_gr
 }
 
 pub fn toCpu(self: Executor, alloc: std.mem.Allocator, scratch_cl: *cl.Alloc, tensor: Tensor) ![]f32 {
-    const res_cpu = try alloc.alloc(f32, tensor.dims.numElems());
-
-    const event = try self.executor.readBuffer(scratch_cl, tensor.buf, 0, std.mem.sliceAsBytes(res_cpu));
-    try event.wait();
-
-    return res_cpu;
+    const ts = tensor.asSlice();
+    const res = try self.sliceToCpuDeferred(alloc, scratch_cl, ts);
+    try res.event.wait();
+    return res.val;
 }
 
-pub fn matmul(self: Executor, cl_alloc: *cl.Alloc, a: Tensor, b: Tensor) !Tensor {
-    if (a.dims.len() != 2 or b.dims.len() != 2) {
+pub fn sliceToCpuDeferred(self: Executor, data_alloc: std.mem.Allocator, event_alloc: *cl.Alloc, tensor: TensorSlice) !Deferred([]f32) {
+    const res_cpu = try data_alloc.alloc(f32, tensor.dims.numElems());
+
+    const event = try self.executor.readBuffer(event_alloc, tensor.buf, tensor.elem_offs * @sizeOf(f32), std.mem.sliceAsBytes(res_cpu));
+
+    return .{
+        .event = event,
+        .val = res_cpu,
+    };
+}
+
+pub fn transpose(self: Executor, cl_alloc: *cl.Alloc, in: Tensor) !Tensor {
+    if (in.dims.len() != 2) return error.Unimplemented;
+
+    const out_dims = try math.TensorDims.init(cl_alloc.heap(), &.{ in.dims.get(1), in.dims.get(0) });
+    const out = try self.createTensorUninitialized(cl_alloc, out_dims);
+
+    try self.executor.executeKernelUntracked(self.transpose_kernel, out.dims.numElems(), &.{
+        .{ .buf = in.buf },
+        .{ .buf = out.buf },
+        .{ .uint = in.dims.get(0) },
+        .{ .uint = in.dims.get(1) },
+    });
+
+    return out;
+}
+
+fn validateMatmulDims(a: Tensor, b: Tensor) !void {
+    if (a.dims.len() != 2 or b.dims.len() != 3) {
         return error.InvalidMatMul;
     }
 
@@ -446,8 +501,12 @@ pub fn matmul(self: Executor, cl_alloc: *cl.Alloc, a: Tensor, b: Tensor) !Tensor
         std.log.err("{} cannot matmul {}\n", .{ a.dims, b.dims });
         return error.InvalidDims;
     }
+}
 
-    const out_dims = try math.TensorDims.init(cl_alloc.heap(), &.{ b.dims.get(0), a.dims.get(1) });
+pub fn matmul(self: Executor, cl_alloc: *cl.Alloc, a: Tensor, b: Tensor) !Tensor {
+    try validateMatmulDims(a, b);
+
+    const out_dims = try math.TensorDims.init(cl_alloc.heap(), &.{ b.dims.get(0), a.dims.get(1), b.dims.get(2) });
 
     const ret = try self.executor.createBuffer(cl_alloc, .read_write, out_dims.byteSize());
 
@@ -458,6 +517,7 @@ pub fn matmul(self: Executor, cl_alloc: *cl.Alloc, a: Tensor, b: Tensor) !Tensor
         .{ .uint = a.dims.get(1) },
         .{ .buf = b.buf },
         .{ .uint = b.dims.get(0) },
+        .{ .uint = b.dims.get(1) },
         .{ .buf = ret },
         .{ .uint = n },
     });
@@ -469,14 +529,29 @@ pub fn matmul(self: Executor, cl_alloc: *cl.Alloc, a: Tensor, b: Tensor) !Tensor
 }
 
 pub fn matmulGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_gradients: Tensor, a: Tensor, b: Tensor) ![2]Tensor {
+    try validateMatmulDims(a, b);
+
+    if (downstream_gradients.dims.len() != 3) {
+        return error.InvalidDims;
+    }
+
+    if (downstream_gradients.dims.get(0) != b.dims.get(0) or
+        downstream_gradients.dims.get(1) != a.dims.get(1) or
+        downstream_gradients.dims.get(2) != b.dims.get(2))
+    {
+        return error.InvalidDims;
+    }
+
     const a_grad = try self.createTensorUninitialized(cl_alloc, a.dims);
     const b_grad = try self.createTensorUninitialized(cl_alloc, b.dims);
 
     const a_n = a_grad.dims.numElems();
     try self.executor.executeKernelUntracked(self.matmul_grad_a_kernel, a_n, &.{
         .{ .buf = downstream_gradients.buf },
+        .{ .uint = downstream_gradients.dims.get(2) },
         .{ .buf = a.buf },
         .{ .uint = a.dims.get(0) },
+        .{ .uint = a.dims.get(1) },
         .{ .buf = b.buf },
         .{ .uint = b.dims.get(0) },
         .{ .buf = a_grad.buf },
@@ -491,6 +566,7 @@ pub fn matmulGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_gradients: Ten
         .{ .uint = a.dims.get(1) },
         .{ .buf = b.buf },
         .{ .uint = b.dims.get(0) },
+        .{ .uint = b.dims.get(1) },
         .{ .buf = b_grad.buf },
         .{ .uint = b_n },
     });
@@ -516,6 +592,7 @@ pub fn sigmoid(self: Executor, cl_alloc: *cl.Alloc, in: Tensor) !Tensor {
 
 pub fn sigmoidGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_grad: Tensor, in: Tensor) !Tensor {
     if (!downstream_grad.dims.eql(in.dims)) {
+        std.log.err("downstream {any} does not match in {any}\n", .{ downstream_grad.dims, in.dims });
         return error.InvalidDims;
     }
 
@@ -533,6 +610,134 @@ pub fn sigmoidGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_grad: Tensor,
         .buf = ret,
         .dims = try in.dims.clone(cl_alloc.heap()),
     };
+}
+
+pub fn relu(self: Executor, cl_alloc: *cl.Alloc, in: Tensor) !Tensor {
+    const ret = try self.executor.createBuffer(cl_alloc, .read_write, in.dims.byteSize());
+
+    const n = in.dims.numElems();
+    try self.executor.executeKernelUntracked(self.relu_kernel, n, &.{
+        .{ .buf = in.buf },
+        .{ .buf = ret },
+        .{ .uint = n },
+    });
+
+    return .{
+        .buf = ret,
+        .dims = try in.dims.clone(cl_alloc.heap()),
+    };
+}
+
+pub fn reluGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_grad: Tensor, in: Tensor) !Tensor {
+    if (!downstream_grad.dims.eql(in.dims)) {
+        std.log.err("downstream {any} does not match in {any}\n", .{ downstream_grad.dims, in.dims });
+        return error.InvalidDims;
+    }
+
+    const ret = try self.executor.createBuffer(cl_alloc, .read_write, in.dims.byteSize());
+
+    const n = in.dims.numElems();
+    try self.executor.executeKernelUntracked(self.relu_grad_kernel, n, &.{
+        .{ .buf = downstream_grad.buf },
+        .{ .buf = in.buf },
+        .{ .buf = ret },
+        .{ .uint = n },
+    });
+
+    return .{
+        .buf = ret,
+        .dims = try in.dims.clone(cl_alloc.heap()),
+    };
+}
+
+pub fn convMany(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, kernel: Tensor) !Tensor {
+    // in dims (w, h, in_c, n)
+    // kernel dims (kw, kh, in_c, out_c)
+    // ret (w, h, out_c, n)
+
+    if (in.dims.len() != 4) {
+        return error.InvalidDims;
+    }
+
+    if (kernel.dims.len() != 4) {
+        return error.InvalidDims;
+    }
+
+    if (kernel.dims.get(2) != in.dims.get(2)) {
+        return error.InvalidDims;
+    }
+
+    const out_dims = try math.TensorDims.init(cl_alloc.heap(), &.{ in.dims.get(0), in.dims.get(1), kernel.dims.get(3), in.dims.get(3) });
+    const ret = try self.createTensorUninitialized(cl_alloc, out_dims);
+
+    const n = out_dims.numElems();
+    try self.executor.executeKernelUntracked(self.conv_many_kernel, n, &.{
+        .{ .buf = in.buf },
+        .{ .buf = kernel.buf },
+        .{ .buf = ret.buf },
+        .{ .uint = in.dims.get(0) },
+        .{ .uint = in.dims.get(1) },
+        .{ .uint = in.dims.get(2) },
+        .{ .uint = in.dims.get(3) },
+        .{ .uint = kernel.dims.get(0) },
+        .{ .uint = kernel.dims.get(1) },
+        .{ .uint = kernel.dims.get(3) },
+    });
+
+    return ret;
+}
+
+pub fn convManyGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_gradients: Tensor, img_input: Tensor, kernel_input: Tensor) ![2]Tensor {
+    // FIXME: Validate :D
+
+    const a_grad = try self.createTensorUninitialized(cl_alloc, img_input.dims);
+    const b_grad = try self.createTensorUninitialized(cl_alloc, kernel_input.dims);
+
+    const grad_kernel = try self.createTensorUninitialized(cl_alloc, &.{
+        kernel_input.dims.get(0),
+        kernel_input.dims.get(1),
+        kernel_input.dims.get(3),
+        kernel_input.dims.get(2),
+    });
+    const kernel_num_elems = kernel_input.dims.numElems();
+    try self.executor.executeKernelUntracked(self.conv_many_make_grad_mirrored_kernel_kernel, kernel_num_elems, &.{
+        .{ .buf = kernel_input.buf },
+        .{ .buf = grad_kernel.buf },
+        .{ .uint = kernel_input.dims.get(0) },
+        .{ .uint = kernel_input.dims.get(1) },
+        .{ .uint = kernel_input.dims.get(2) },
+        .{ .uint = kernel_input.dims.get(3) },
+    });
+
+    const a_n = a_grad.dims.numElems();
+    try self.executor.executeKernelUntracked(self.conv_many_grad_img_kernel, a_n, &.{
+        .{ .buf = downstream_gradients.buf },
+        .{ .buf = grad_kernel.buf },
+        .{ .buf = a_grad.buf },
+        .{ .uint = img_input.dims.get(0) },
+        .{ .uint = img_input.dims.get(1) },
+        .{ .uint = img_input.dims.get(2) },
+        .{ .uint = img_input.dims.get(3) },
+        .{ .uint = kernel_input.dims.get(0) },
+        .{ .uint = kernel_input.dims.get(1) },
+        .{ .uint = kernel_input.dims.get(3) },
+    });
+
+    const b_n = b_grad.dims.numElems();
+    try self.executor.executeKernelUntracked(self.conv_many_grad_kernel_kernel, b_n, &.{
+        .{ .buf = downstream_gradients.buf },
+        .{ .buf = img_input.buf },
+        .{ .buf = b_grad.buf },
+        .{ .uint = img_input.dims.get(0) },
+        .{ .uint = img_input.dims.get(1) },
+        .{ .uint = img_input.dims.get(2) },
+        .{ .uint = img_input.dims.get(3) },
+        .{ .uint = kernel_input.dims.get(0) },
+        .{ .uint = kernel_input.dims.get(1) },
+        .{ .uint = kernel_input.dims.get(3) },
+    });
+
+    return .{ a_grad, b_grad };
 }
 
 const ClExecutorFixture = struct {
@@ -623,19 +828,27 @@ test "matmul" {
         7,  8,  9,  10,
         11, 12, 13, 14,
         15, 16, 17, 18,
-    }, &.{ 4, 3 });
+
+        19, 20, 21, 22,
+        23, 24, 25, 26,
+        27, 28, 29, 30,
+    }, &.{ 4, 3, 2 });
 
     const c = try fixture.cl_math.matmul(&fixture.cl_alloc, a, b);
 
     try std.testing.expectEqual(4, c.dims.get(0));
     try std.testing.expectEqual(2, c.dims.get(1));
+    try std.testing.expectEqual(2, c.dims.get(2));
 
     const expected: []const f32 = &.{
         74,  80,  86,  92,
         173, 188, 203, 218,
+
+        146, 152, 158, 164,
+        353, 368, 383, 398,
     };
 
-    var actual: [8]f32 = undefined;
+    var actual: [16]f32 = undefined;
     const finish = try fixture.executor.readBuffer(&fixture.cl_alloc, c.buf, 0, std.mem.sliceAsBytes(&actual));
     try finish.wait();
 
@@ -651,8 +864,16 @@ test "matmulGrad" {
 
     const grads = try fixture.cl_math.createTensorUntracked(
         &fixture.cl_alloc,
-        &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9 },
-        &.{ 3, 3 },
+        &.{
+            1,  2,  3,
+            4,  5,  6,
+            7,  8,  9,
+
+            22, 23, 24,
+            25, 26, 27,
+            28, 29, 30,
+        },
+        &.{ 3, 3, 2 },
     );
 
     const a = try fixture.cl_math.createTensorUntracked(
@@ -670,21 +891,42 @@ test "matmulGrad" {
         &.{
             16, 17, 18,
             19, 20, 21,
+
+            31, 32, 33,
+            34, 35, 36,
         },
-        &.{ 3, 2 },
+        &.{ 3, 2, 2 },
     );
 
     const a_grads, const b_grads = try fixture.cl_math.matmulGrad(&fixture.cl_alloc, grads, a, b);
 
     const a_expected: []const f32 = &.{
-        1 * 16 + 2 * 17 + 3 * 18, 1 * 19 + 2 * 20 + 3 * 21,
-        4 * 16 + 5 * 17 + 6 * 18, 4 * 19 + 5 * 20 + 6 * 21,
-        7 * 16 + 8 * 17 + 9 * 18, 7 * 19 + 8 * 20 + 9 * 21,
+        1 * 16 + 2 * 17 + 3 * 18 + 22 * 31 + 23 * 32 + 24 * 33,
+        1 * 19 + 2 * 20 + 3 * 21 + 22 * 34 + 23 * 35 + 24 * 36,
+
+        4 * 16 + 5 * 17 + 6 * 18 + 25 * 31 + 26 * 32 + 27 * 33,
+        4 * 19 + 5 * 20 + 6 * 21 + 25 * 34 + 26 * 35 + 27 * 36,
+
+        7 * 16 + 8 * 17 + 9 * 18 + 28 * 31 + 29 * 32 + 30 * 33,
+        7 * 19 + 8 * 20 + 9 * 21 + 28 * 34 + 29 * 35 + 30 * 36,
     };
 
     const b_expected: []const f32 = &.{
-        1 * 10 + 4 * 12 + 7 * 14, 2 * 10 + 5 * 12 + 8 * 14, 3 * 10 + 6 * 12 + 9 * 14,
-        1 * 11 + 4 * 13 + 7 * 15, 2 * 11 + 5 * 13 + 8 * 15, 3 * 11 + 6 * 13 + 9 * 15,
+        1 * 10 + 4 * 12 + 7 * 14,
+        2 * 10 + 5 * 12 + 8 * 14,
+        3 * 10 + 6 * 12 + 9 * 14,
+
+        1 * 11 + 4 * 13 + 7 * 15,
+        2 * 11 + 5 * 13 + 8 * 15,
+        3 * 11 + 6 * 13 + 9 * 15,
+
+        22 * 10 + 25 * 12 + 28 * 14,
+        23 * 10 + 26 * 12 + 29 * 14,
+        24 * 10 + 27 * 12 + 30 * 14,
+
+        22 * 11 + 25 * 13 + 28 * 15,
+        23 * 11 + 26 * 13 + 29 * 15,
+        24 * 11 + 27 * 13 + 30 * 15,
     };
 
     const a_actual = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, a_grads);
@@ -766,7 +1008,68 @@ test "sigmoidGrad" {
     }
 }
 
-test "addSplatHorizontal" {
+test "relu" {
+    var fixture: ClExecutorFixture = undefined;
+    try fixture.initPinned();
+    defer fixture.deinit();
+
+    const in_cpu = &.{
+        -2,  0.1, -0.1,
+        0.5, 3,   0.0,
+    };
+    const in_gpu = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, in_cpu, &.{ 3, 2 });
+
+    const out_gpu = try fixture.cl_math.relu(&fixture.cl_alloc, in_gpu);
+
+    try std.testing.expect(in_gpu.dims.eql(out_gpu.dims));
+
+    const out_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, out_gpu);
+
+    const expected: []const f32 = &.{
+        0,   0.1, 0,
+        0.5, 3,   0.0,
+    };
+
+    for (expected, out_cpu) |ex, ac| {
+        try std.testing.expectApproxEqAbs(ex, ac, 0.0001);
+    }
+}
+
+test "reluGrad" {
+    var fixture: ClExecutorFixture = undefined;
+    try fixture.initPinned();
+    defer fixture.deinit();
+
+    const in_cpu = &.{
+        -2,  0.1, -0.1,
+        0.5, 3,   0.0,
+    };
+
+    const downstream_grads_cpu = &.{
+        1, 2, 3,
+        4, 5, 6,
+    };
+
+    const in_gpu = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, in_cpu, &.{ 3, 2 });
+    const downstream_grads_gpu = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, downstream_grads_cpu, &.{ 3, 2 });
+
+    const out_gpu = try fixture.cl_math.reluGrad(&fixture.cl_alloc, downstream_grads_gpu, in_gpu);
+
+    try std.testing.expect(in_gpu.dims.eql(out_gpu.dims));
+
+    const out_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, out_gpu);
+
+    const expected: []const f32 = &.{
+        0, 2, 0,
+        4, 5, 0,
+    };
+
+    for (expected, out_cpu) |ex, ac| {
+        try std.testing.expectApproxEqAbs(ex, ac, 0.0001);
+    }
+}
+
+test "addSplatOuter" {
     var fixture: ClExecutorFixture = undefined;
     try fixture.initPinned();
     defer fixture.deinit();
@@ -780,13 +1083,13 @@ test "addSplatHorizontal" {
     }, &.{ 4, 4 });
 
     const expected: []const f32 = &.{
-        6,  7,  8,  9,
-        11, 12, 13, 14,
-        16, 17, 18, 19,
-        21, 22, 23, 24,
+        6,  8,  10, 12,
+        10, 12, 14, 16,
+        14, 16, 18, 20,
+        18, 20, 22, 24,
     };
 
-    const actual_gpu = try fixture.cl_math.addSplatHorizontal(&fixture.cl_alloc, a, b);
+    const actual_gpu = try fixture.cl_math.addSplatOuter(&fixture.cl_alloc, a, b);
     var actual: [16]f32 = undefined;
     const final = try fixture.executor.readBuffer(&fixture.cl_alloc, actual_gpu.buf, 0, std.mem.sliceAsBytes(&actual));
     try final.wait();
@@ -796,7 +1099,7 @@ test "addSplatHorizontal" {
     }
 }
 
-test "addSplatHorizontalGrad" {
+test "addSplatOuterGrad" {
     var fixture: ClExecutorFixture = undefined;
     try fixture.initPinned();
     defer fixture.deinit();
@@ -817,10 +1120,10 @@ test "addSplatHorizontalGrad" {
     }, &.{ 4, 4 });
 
     const expected_a: []const f32 = &.{
-        21 + 22 + 23 + 24,
-        25 + 26 + 27 + 28,
-        29 + 30 + 31 + 32,
-        33 + 34 + 35 + 36,
+        21 + 25 + 29 + 33,
+        22 + 26 + 30 + 34,
+        23 + 27 + 31 + 35,
+        24 + 28 + 32 + 36,
     };
 
     const expected_b: []const f32 = &.{
@@ -830,7 +1133,7 @@ test "addSplatHorizontalGrad" {
         33, 34, 35, 36,
     };
 
-    const a_grad, const b_grad = try fixture.cl_math.addSplatHorizontalGrad(&fixture.cl_alloc, downstream_gradients, a, b);
+    const a_grad, const b_grad = try fixture.cl_math.addSplatOuterGrad(&fixture.cl_alloc, downstream_gradients, a, b);
 
     const a_grad_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, a_grad);
     const b_grad_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, b_grad);
@@ -1021,7 +1324,7 @@ test "gaussian" {
     defer fixture.deinit();
 
     const num_nums = 1000000;
-    const numbers_gpu = try fixture.cl_math.randGaussian(&fixture.cl_alloc, &.{num_nums}, &fixture.rand_source);
+    const numbers_gpu = try fixture.cl_math.randGaussian(&fixture.cl_alloc, &.{num_nums}, 1.0, &fixture.rand_source);
     const numbers_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, numbers_gpu);
 
     const num_buckets = 1000;
@@ -1048,4 +1351,163 @@ test "gaussian" {
 
     const chi2 = calcChiSquared(&actual, &expected);
     try std.testing.expect(chi2 < chi2_threshold);
+}
+
+test "convMany" {
+    var fixture: ClExecutorFixture = undefined;
+    try fixture.initPinned();
+    defer fixture.deinit();
+
+    // (5, 5, 2, 1)
+    const in_img: []const f32 = &.{
+        // c1
+        0, 0, 1, 1, 1,
+        0, 0, 1, 1, 1,
+        1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1,
+
+        // c2
+        0, 0, 0, 1, 1,
+        0, 0, 0, 1, 1,
+        1, 1, 1, 1, 1,
+        0, 0, 0, 1, 1,
+        0, 0, 0, 1, 1,
+    };
+
+    // (3, 3, 2, 2)
+    // Sum horizontal and vertical gradients
+    const in_kernel: []const f32 = &.{
+        // o1, c1
+        0,  -1, 0,
+        0,  0,  0,
+        0,  1,  0,
+
+        // o1, c2
+        0,  0,  0,
+        -1, 0,  1,
+        0,  0,  0,
+
+        //// o2, c1
+        0,  0,  0,
+        -1, 0,  1,
+        0,  0,  0,
+
+        //// o2, c2
+        0,  -1, 0,
+        0,  0,  0,
+        0,  1,  0,
+    };
+
+    const expected_output: []const f32 = &.{
+        0,  0,  1,  1, 0,
+        1,  1,  1,  1, 0,
+        1,  1,  0,  0, 0,
+        0,  0,  1,  1, 0,
+        0,  0,  1,  1, 0,
+
+        0,  1,  1,  0, 0,
+        1,  2,  2,  0, 0,
+        0,  0,  0,  0, 0,
+        -1, -1, -1, 0, 0,
+        0,  0,  0,  0, 0,
+    };
+
+    const img_gpu = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, in_img, &.{ 5, 5, 2, 1 });
+    const kernel_gpu = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, in_kernel, &.{ 3, 3, 2, 2 });
+
+    const ret = try fixture.cl_math.convMany(&fixture.cl_alloc, img_gpu, kernel_gpu);
+    try std.testing.expectEqualSlices(u32, ret.dims.inner, &.{ 5, 5, 2, 1 });
+
+    const ret_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, ret);
+
+    for (ret_cpu, expected_output) |ac, ex| {
+        try std.testing.expectApproxEqAbs(ex, ac, 0.0001);
+    }
+}
+
+const JsonTensor = struct {
+    shape: []const u32,
+    data: []const f32,
+
+    fn toTensor(self: JsonTensor, alloc: *cl.Alloc, executor: Executor) !Tensor {
+        return try executor.createTensorUntracked(alloc, self.data, self.shape);
+    }
+};
+
+const ConvDefinition = struct {
+    name: []const u8,
+    img: JsonTensor,
+    kernel: JsonTensor,
+    downstream_grad: JsonTensor,
+    kernel_grad: JsonTensor,
+    img_grad: JsonTensor,
+    output: JsonTensor,
+};
+
+test "convMany2" {
+    var fixture: ClExecutorFixture = undefined;
+    try fixture.initPinned();
+    defer fixture.deinit();
+
+    const test_data = try std.json.parseFromSliceLeaky([]ConvDefinition, fixture.cl_alloc.heap(), @embedFile("conv_test_data"), .{ .ignore_unknown_fields = true });
+
+    for (test_data) |test_elem| {
+        const img = try test_elem.img.toTensor(&fixture.cl_alloc, fixture.cl_math);
+        const kernel = try test_elem.kernel.toTensor(&fixture.cl_alloc, fixture.cl_math);
+
+        const output = try fixture.cl_math.convMany(&fixture.cl_alloc, img, kernel);
+        try std.testing.expect(output.dims.eql(try .init(fixture.cl_alloc.heap(), test_elem.output.shape)));
+
+        const downstream_grad = try test_elem.downstream_grad.toTensor(&fixture.cl_alloc, fixture.cl_math);
+
+        const img_grads, const kernel_grads = try fixture.cl_math.convManyGrad(&fixture.cl_alloc, downstream_grad, img, kernel);
+
+        try std.testing.expect(img_grads.dims.eql(try .init(fixture.cl_alloc.heap(), test_elem.img_grad.shape)));
+        try std.testing.expect(kernel_grads.dims.eql(try .init(fixture.cl_alloc.heap(), test_elem.kernel_grad.shape)));
+
+        const output_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, output);
+        const kg_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, kernel_grads);
+        const ig_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, img_grads);
+
+        for (output_cpu, test_elem.output.data) |ac, ex| {
+            try std.testing.expectApproxEqAbs(ex, ac, 0.01);
+        }
+
+        for (kg_cpu, test_elem.kernel_grad.data) |ac, ex| {
+            try std.testing.expectApproxEqAbs(ex, ac, 0.01);
+        }
+
+        for (ig_cpu, test_elem.img_grad.data) |ac, ex| {
+            try std.testing.expectApproxEqAbs(ex, ac, 0.01);
+        }
+    }
+}
+
+test "transpose" {
+    var fixture: ClExecutorFixture = undefined;
+    try fixture.initPinned();
+    defer fixture.deinit();
+
+    const in_cpu = &.{
+        1, 2, 3,
+        4, 5, 6,
+    };
+
+    const in_gpu = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, in_cpu, &.{ 3, 2 });
+    const out_gpu = try fixture.cl_math.transpose(&fixture.cl_alloc, in_gpu);
+    try std.testing.expectEqual(out_gpu.dims.get(0), 2);
+    try std.testing.expectEqual(out_gpu.dims.get(1), 3);
+
+    const expected: []const f32 = &.{
+        1, 4,
+        2, 5,
+        3, 6,
+    };
+
+    const out_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, out_gpu);
+
+    for (expected, out_cpu) |ex, ac| {
+        try std.testing.expectApproxEqAbs(ex, ac, 0.0001);
+    }
 }

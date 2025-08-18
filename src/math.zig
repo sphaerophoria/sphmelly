@@ -4,12 +4,22 @@ pub const Executor = @import("math/Executor.zig");
 pub const TracingExecutor = @import("math/TracingExecutor.zig");
 
 pub const TensorDims = struct {
-    inner: []u32,
+    inner: []const u32,
+
+    pub const empty = TensorDims{
+        .inner = &.{},
+    };
 
     pub fn init(alloc: std.mem.Allocator, vals: anytype) !TensorDims {
         return switch (@TypeOf(vals)) {
             TensorDims => try vals.clone(alloc),
             else => .{ .inner = try alloc.dupe(u32, vals) },
+        };
+    }
+
+    pub fn initRef(vals: []const u32) TensorDims {
+        return .{
+            .inner = vals,
         };
     }
 
@@ -27,10 +37,6 @@ pub const TensorDims = struct {
 
     pub fn get(self: TensorDims, idx: usize) u32 {
         return self.inner[idx];
-    }
-
-    pub fn getPtr(self: TensorDims, idx: usize) *u32 {
-        return &self.inner[idx];
     }
 
     pub fn len(self: TensorDims) usize {
@@ -66,6 +72,23 @@ pub const TensorDims = struct {
         return true;
     }
 
+    pub fn outerElemOffs(self: TensorDims, idx: usize) !usize {
+        if (idx >= self.inner[self.len() - 1]) {
+            return error.InvalidDims;
+        }
+
+        const elems_per_outer = (try self.dropOuter()).numElems();
+        return elems_per_outer * idx;
+    }
+
+    pub fn dropOuter(self: TensorDims) !TensorDims {
+        if (self.len() <= 1) {
+            return error.InvalidDims;
+        }
+
+        return .{ .inner = self.inner[0 .. self.len() - 1] };
+    }
+
     pub fn format(self: TensorDims, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         try writer.print("{d}", .{self.inner[0]});
         var it: usize = 1;
@@ -77,10 +100,34 @@ pub const TensorDims = struct {
     }
 };
 
+pub fn TensorSlice(comptime Store: type) type {
+    return struct {
+        buf: Store,
+        dims: TensorDims,
+        elem_offs: usize,
+    };
+}
+
 pub fn Tensor(comptime Store: type) type {
     return struct {
         buf: Store,
         dims: TensorDims,
+
+        pub fn asSlice(self: @This()) TensorSlice(Store) {
+            return .{
+                .buf = self.buf,
+                .dims = self.dims,
+                .elem_offs = 0,
+            };
+        }
+
+        pub fn indexOuter(self: @This(), idx: usize) !TensorSlice(Store) {
+            return .{
+                .buf = self.buf,
+                .dims = try self.dims.dropOuter(),
+                .elem_offs = try self.dims.outerElemOffs(idx),
+            };
+        }
     };
 }
 

@@ -34,7 +34,7 @@ pub const Alloc = struct {
         self.resetKernels(0);
     }
 
-    const Checkpoint = struct {
+    pub const Checkpoint = struct {
         heap: sphtud.alloc.BufAllocator.Checkpoint,
         mem: usize,
         events: usize,

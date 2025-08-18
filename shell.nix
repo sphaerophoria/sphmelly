@@ -17,6 +17,7 @@ pkgs.mkShell {
     opencl-headers
     ocl-icd
     khronos-ocl-icd-loader
+    python3Packages.torch
   ];
 
   LD_LIBRARY_PATH = "${pkgs.wayland}/lib";

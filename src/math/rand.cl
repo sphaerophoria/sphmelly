@@ -118,13 +118,14 @@ __kernel void gaussian(
         __global float* output,
         ulong initial_ctr,
         uint seed,
-        uint n
+        uint n,
+        float stddev
 ) {
     uint global_id = get_global_id(0);
     if (global_id >= n) return;
 
     ulong ctr = (global_id * 2) + initial_ctr;
-    output[global_id] = gaussianRandVal(ctr, seed);
+    output[global_id] = gaussianRandVal(ctr, seed) * stddev;
 }
 
 __kernel void gaussian_noise(

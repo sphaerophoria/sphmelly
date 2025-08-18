@@ -6,6 +6,7 @@ const cl = @import("../cl.zig");
 const TracingExecutor = @This();
 
 pub const Tensor = math.Tensor(NodeId);
+pub const TensorSlice = math.TensorSlice(NodeId);
 
 inner: math.Executor,
 graph: sphtud.util.RuntimeBoundedArray(Node),
@@ -24,8 +25,11 @@ const Operation = union(enum) {
     reshape: NodeId,
     squared_err: TwoParam,
     sigmoid: NodeId,
+    relu: NodeId,
     matmul: TwoParam,
-    add_splat_horizontal: TwoParam,
+    add_splat_outer: TwoParam,
+    conv: TwoParam,
+    transpose: NodeId,
 };
 
 const NodeId = struct { usize };
@@ -72,10 +76,36 @@ pub fn createTensorUntracked(self: *TracingExecutor, cl_alloc: *cl.Alloc, initia
     );
 }
 
+pub fn createTensorFilled(self: *TracingExecutor, cl_alloc: *cl.Alloc, dims_in: []const u32, val: f32) !Tensor {
+    return try self.appendNode(
+        try self.inner.createTensorFilled(cl_alloc, dims_in, val),
+        .init,
+    );
+}
+
 pub fn rand(self: *TracingExecutor, cl_alloc: *cl.Alloc, dims_in: anytype, source: *math.RandSource) !Tensor {
     return try self.appendNode(
         try self.inner.rand(cl_alloc, dims_in, source),
         .init,
+    );
+}
+
+pub fn randGaussian(self: *TracingExecutor, cl_alloc: *cl.Alloc, dims_in: anytype, stddev: f32, source: *math.RandSource) !Tensor {
+    return try self.appendNode(
+        try self.inner.randGaussian(cl_alloc, dims_in, stddev, source),
+        .init,
+    );
+}
+
+pub fn sliceToCpuDeferred(self: *const TracingExecutor, data_alloc: std.mem.Allocator, event_alloc: *cl.Alloc, tensor: TensorSlice) !math.Executor.Deferred([]f32) {
+    return self.inner.sliceToCpuDeferred(
+        data_alloc,
+        event_alloc,
+        .{
+            .buf = self.getClTensor(tensor.buf).buf,
+            .elem_offs = tensor.elem_offs,
+            .dims = tensor.dims,
+        },
     );
 }
 
@@ -90,6 +120,13 @@ pub fn reshape(self: *TracingExecutor, cl_alloc: *cl.Alloc, val: Tensor, new_dim
     );
 }
 
+pub fn transpose(self: *TracingExecutor, cl_alloc: *cl.Alloc, val: Tensor) !Tensor {
+    return try self.appendNode(
+        try self.inner.transpose(cl_alloc, self.getClTensor(val.buf)),
+        .{ .transpose = val.buf },
+    );
+}
+
 pub fn gt(self: *TracingExecutor, cl_alloc: *cl.Alloc, in: Tensor, dim: u32) !Tensor {
     return try self.appendNode(
         try self.inner.gt(cl_alloc, self.getClTensor(in.buf), dim),
@@ -97,6 +134,18 @@ pub fn gt(self: *TracingExecutor, cl_alloc: *cl.Alloc, in: Tensor, dim: u32) !Te
             .gt = .{
                 .in = in.buf,
                 .dim = dim,
+            },
+        },
+    );
+}
+
+pub fn convMany(self: *TracingExecutor, cl_alloc: *cl.Alloc, in: Tensor, kernel: Tensor) !Tensor {
+    return try self.appendNode(
+        try self.inner.convMany(cl_alloc, self.getClTensor(in.buf), self.getClTensor(kernel.buf)),
+        .{
+            .conv = .{
+                .a = in.buf,
+                .b = kernel.buf,
             },
         },
     );
@@ -114,13 +163,13 @@ pub fn squaredErr(self: *TracingExecutor, cl_alloc: *cl.Alloc, a: Tensor, b: Ten
     );
 }
 
-pub fn addSplatHorizontal(self: *TracingExecutor, cl_alloc: *cl.Alloc, a: Tensor, b: Tensor) !Tensor {
+pub fn addSplatOuter(self: *TracingExecutor, cl_alloc: *cl.Alloc, a: Tensor, b: Tensor) !Tensor {
     const a_inner = self.getClTensor(a.buf);
     const b_inner = self.getClTensor(b.buf);
     return try self.appendNode(
-        try self.inner.addSplatHorizontal(cl_alloc, a_inner, b_inner),
+        try self.inner.addSplatOuter(cl_alloc, a_inner, b_inner),
         .{
-            .add_splat_horizontal = .{
+            .add_splat_outer = .{
                 .a = a.buf,
                 .b = b.buf,
             },
@@ -147,6 +196,15 @@ pub fn sigmoid(self: *TracingExecutor, cl_alloc: *cl.Alloc, in: Tensor) !Tensor 
         try self.inner.sigmoid(cl_alloc, self.getClTensor(in.buf)),
         .{
             .sigmoid = in.buf,
+        },
+    );
+}
+
+pub fn relu(self: *TracingExecutor, cl_alloc: *cl.Alloc, in: Tensor) !Tensor {
+    return try self.appendNode(
+        try self.inner.relu(cl_alloc, self.getClTensor(in.buf)),
+        .{
+            .relu = in.buf,
         },
     );
 }
@@ -187,7 +245,7 @@ pub fn printBackwards(self: TracingExecutor, id: NodeId, indent_level: usize) vo
         .reshape, .sigmoid => |next| {
             self.printBackwards(next, indent_level + 1);
         },
-        .squared_err, .add_splat_horizontal, .matmul => |params| {
+        .squared_err, .add_splat_outer, .matmul => |params| {
             self.printBackwards(params.a, indent_level + 1);
             self.printBackwards(params.b, indent_level + 1);
         },
@@ -261,13 +319,22 @@ fn backpropInner(self: TracingExecutor, cl_alloc: *cl.Alloc, id: NodeId, downstr
 
             try self.backpropInner(cl_alloc, source_id, grads, gradient_tree);
         },
-        .add_splat_horizontal => |params| {
+        .relu => |source_id| {
+            const inputs = self.getClTensor(source_id);
+            const grads = try self.inner.reluGrad(cl_alloc, downstream_gradients, inputs);
+
+            // FIXME: This only has to happen if it's a gradient we care about
+            try self.inner.addAssign(gradient_tree.get(source_id), grads);
+
+            try self.backpropInner(cl_alloc, source_id, grads, gradient_tree);
+        },
+        .add_splat_outer => |params| {
             try self.backpropTwoParams(
                 cl_alloc,
                 params,
                 downstream_gradients,
                 gradient_tree,
-                math.Executor.addSplatHorizontalGrad,
+                math.Executor.addSplatOuterGrad,
             );
         },
         .init => {},
@@ -281,6 +348,19 @@ fn backpropInner(self: TracingExecutor, cl_alloc: *cl.Alloc, id: NodeId, downstr
                 gradient_tree,
                 math.Executor.matmulGrad,
             );
+        },
+        .conv => |params| {
+            try self.backpropTwoParams(
+                cl_alloc,
+                params,
+                downstream_gradients,
+                gradient_tree,
+                math.Executor.convManyGrad,
+            );
+        },
+        .transpose => |source_id| {
+            const grads = try self.inner.transpose(cl_alloc, downstream_gradients);
+            try self.backpropInner(cl_alloc, source_id, grads, gradient_tree);
         },
     }
 }

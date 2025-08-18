@@ -353,3 +353,30 @@ pub fn greyTensorToRgbaCpu(alloc: std.mem.Allocator, img_tensor: math.Tensor([]f
         .width = img_tensor.dims.get(0),
     };
 }
+
+pub fn gradTensorToRgbaCpu(alloc: std.mem.Allocator, data: []const f32, dims: []const u32, mul: f32) !CpuImage {
+    var size = dims[0];
+    for (dims[1..]) |v| {
+        size *= v;
+    }
+
+    const img_cpu_rgba: []u8 = try alloc.alloc(u8, size * 4);
+
+    for (0..data.len) |i| {
+        const abs: u8 = @intFromFloat(@max(0, @min(@abs(255 * data[i] * mul), 255)));
+        if (data[i] < 0) {
+            img_cpu_rgba[i * 4 + 0] = 0;
+            img_cpu_rgba[i * 4 + 2] = abs;
+        } else {
+            img_cpu_rgba[i * 4 + 0] = abs;
+            img_cpu_rgba[i * 4 + 2] = 0;
+        }
+        img_cpu_rgba[i * 4 + 1] = 0;
+        img_cpu_rgba[i * 4 + 3] = 255;
+    }
+
+    return CpuImage{
+        .data = img_cpu_rgba,
+        .width = dims[0],
+    };
+}
