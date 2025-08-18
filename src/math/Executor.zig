@@ -503,26 +503,20 @@ const ClExecutorFixture = struct {
     cl_math: Executor,
     rand_source: math.RandSource,
 
-    fn init() !ClExecutorFixture {
-        const buf = try std.heap.page_allocator.alloc(u8, 10 * 1024 * 1024);
+    fn initPinned(self: *ClExecutorFixture) !void {
+        self.buf = try std.heap.page_allocator.alloc(u8, 10 * 1024 * 1024);
 
-        const executor = try cl.Executor.init();
-        errdefer executor.deinit();
+        self.executor = try cl.Executor.init();
+        errdefer self.executor.deinit();
 
-        var cl_alloc = try cl.Alloc.init(buf);
-        errdefer cl_alloc.deinit();
+        try self.cl_alloc.initPinned(self.buf);
+        errdefer self.cl_alloc.deinit();
 
-        const cl_math = try Executor.init(&cl_alloc, executor);
+        self.cl_math = try Executor.init(&self.cl_alloc, self.executor);
 
-        return .{
-            .buf = buf,
-            .executor = executor,
-            .cl_math = cl_math,
-            .cl_alloc = cl_alloc,
-            .rand_source = .{
-                .ctr = 0,
-                .seed = 0,
-            },
+        self.rand_source = .{
+            .ctr = 0,
+            .seed = 0,
         };
     }
 
@@ -534,7 +528,8 @@ const ClExecutorFixture = struct {
 };
 
 test "addAssign" {
-    var fixture = try ClExecutorFixture.init();
+    var fixture: ClExecutorFixture = undefined;
+    try fixture.initPinned();
     defer fixture.deinit();
 
     const a = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, &.{
@@ -556,7 +551,8 @@ test "addAssign" {
 }
 
 test "mulScalar" {
-    var fixture = try ClExecutorFixture.init();
+    var fixture: ClExecutorFixture = undefined;
+    try fixture.initPinned();
     defer fixture.deinit();
 
     const a = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, &.{
@@ -575,7 +571,8 @@ test "mulScalar" {
 }
 
 test "matmul" {
-    var fixture = try ClExecutorFixture.init();
+    var fixture: ClExecutorFixture = undefined;
+    try fixture.initPinned();
     defer fixture.deinit();
 
     const a = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, &.{
@@ -609,7 +606,8 @@ test "matmul" {
 }
 
 test "matmulGrad" {
-    var fixture = try ClExecutorFixture.init();
+    var fixture: ClExecutorFixture = undefined;
+    try fixture.initPinned();
     defer fixture.deinit();
 
     const grads = try fixture.cl_math.createTensorUntracked(
@@ -664,7 +662,8 @@ test "matmulGrad" {
 }
 
 test "sigmoid" {
-    var fixture = try ClExecutorFixture.init();
+    var fixture: ClExecutorFixture = undefined;
+    try fixture.initPinned();
     defer fixture.deinit();
 
     const input: []const f32 = &.{
@@ -690,7 +689,8 @@ test "sigmoid" {
 }
 
 test "sigmoidGrad" {
-    var fixture = try ClExecutorFixture.init();
+    var fixture: ClExecutorFixture = undefined;
+    try fixture.initPinned();
     defer fixture.deinit();
 
     const downstream_grads = try fixture.cl_math.createTensorUntracked(
@@ -728,7 +728,8 @@ test "sigmoidGrad" {
 }
 
 test "addSplatHorizontal" {
-    var fixture = try ClExecutorFixture.init();
+    var fixture: ClExecutorFixture = undefined;
+    try fixture.initPinned();
     defer fixture.deinit();
 
     const a = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, &.{ 1, 2, 3, 4 }, &.{4});
@@ -757,7 +758,8 @@ test "addSplatHorizontal" {
 }
 
 test "addSplatHorizontalGrad" {
-    var fixture = try ClExecutorFixture.init();
+    var fixture: ClExecutorFixture = undefined;
+    try fixture.initPinned();
     defer fixture.deinit();
 
     const a = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, &.{ 1, 2, 3, 4 }, &.{4});
@@ -804,7 +806,8 @@ test "addSplatHorizontalGrad" {
 }
 
 test "gt" {
-    var fixture = try ClExecutorFixture.init();
+    var fixture: ClExecutorFixture = undefined;
+    try fixture.initPinned();
     defer fixture.deinit();
 
     const vals = try fixture.cl_math.createTensorUntracked(
@@ -840,7 +843,8 @@ test "gt" {
 }
 
 test "squaredErr" {
-    var fixture = try ClExecutorFixture.init();
+    var fixture: ClExecutorFixture = undefined;
+    try fixture.initPinned();
     defer fixture.deinit();
 
     const a = try fixture.cl_math.createTensorUntracked(
@@ -870,7 +874,8 @@ test "squaredErr" {
 }
 
 test "squaredErrGrad" {
-    var fixture = try ClExecutorFixture.init();
+    var fixture: ClExecutorFixture = undefined;
+    try fixture.initPinned();
     defer fixture.deinit();
 
     const a = try fixture.cl_math.createTensorUntracked(
@@ -946,7 +951,8 @@ fn calcChiSquared(actual_buckets: []const usize, expected_buckets: []const usize
 const chi2_threshold = 1110.0;
 
 test "rand" {
-    var fixture = try ClExecutorFixture.init();
+    var fixture: ClExecutorFixture = undefined;
+    try fixture.initPinned();
     defer fixture.deinit();
 
     const num_nums = 1000000;
@@ -971,7 +977,8 @@ pub fn normalDistAt(x: f32) f32 {
 }
 
 test "gaussian" {
-    var fixture = try ClExecutorFixture.init();
+    var fixture: ClExecutorFixture = undefined;
+    try fixture.initPinned();
     defer fixture.deinit();
 
     const num_nums = 1000000;

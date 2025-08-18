@@ -14,22 +14,17 @@ pub const Alloc = struct {
     programs: sphtud.util.RuntimeSegmentedList(cl.cl_program),
     kernels: sphtud.util.RuntimeSegmentedList(cl.cl_kernel),
 
-    pub fn init(buf: []u8) !Alloc {
+    pub fn initPinned(self: *Alloc, buf: []u8) !void {
         const small_size = 100;
         const max_size = 1000000;
 
-        var buf_alloc = sphtud.alloc.BufAllocator.init(buf);
-        const alloc = buf_alloc.allocator();
+        self.buf_alloc = sphtud.alloc.BufAllocator.init(buf);
+        const alloc = self.buf_alloc.allocator();
 
-        var ret = Alloc{
-            .buf_alloc = undefined, // Assign after so all allocations have been tracked
-            .mem = try .init(alloc, alloc, small_size, max_size),
-            .events = try .init(alloc, alloc, small_size, max_size),
-            .programs = try .init(alloc, alloc, small_size, max_size),
-            .kernels = try .init(alloc, alloc, small_size, max_size),
-        };
-        ret.buf_alloc = buf_alloc;
-        return ret;
+        self.mem = try .init(alloc, alloc, small_size, max_size);
+        self.events = try .init(alloc, alloc, small_size, max_size);
+        self.programs = try .init(alloc, alloc, small_size, max_size);
+        self.kernels = try .init(alloc, alloc, small_size, max_size);
     }
 
     pub fn deinit(self: *Alloc) void {

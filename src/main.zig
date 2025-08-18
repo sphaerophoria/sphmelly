@@ -82,7 +82,8 @@ pub fn main() !void {
     const cl_executor = try cl.Executor.init();
     defer cl_executor.deinit();
 
-    var cl_alloc = try cl.Alloc.init(try arena.allocator().alloc(u8, 1 * 1024 * 1024));
+    var cl_alloc: cl.Alloc = undefined;
+    try cl_alloc.initPinned(try arena.allocator().alloc(u8, 1 * 1024 * 1024));
     defer cl_alloc.deinit();
 
     const math_executor = try math.Executor.init(&cl_alloc, cl_executor);
