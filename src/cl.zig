@@ -97,10 +97,78 @@ pub const Alloc = struct {
     }
 };
 
+// Every time we queue a kernel, take an event, add to timers
+//   * Which kernels took which times
+
+const KernelTimers = struct {
+    items: sphtud.util.RuntimeBoundedArray(Item),
+
+    const Item = struct {
+        kernel_name: []const u8,
+        event: Executor.Event,
+    };
+
+    pub fn init(alloc: std.mem.Allocator, max_elems: usize) !KernelTimers {
+        return .{
+            .items = try .init(alloc, max_elems),
+        };
+    }
+
+    pub fn append(self: *KernelTimers, kernel_name: []const u8, event: Executor.Event) !void {
+        try self.items.append(.{
+            .kernel_name = kernel_name,
+            .event = event,
+        });
+    }
+
+    pub fn reset(self: *KernelTimers) void {
+        self.items.resize(0) catch unreachable;
+    }
+
+    pub fn times(self: *const KernelTimers, alloc: std.mem.Allocator) !std.StringHashMapUnmanaged(u64) {
+        var ret = std.StringHashMapUnmanaged(u64){};
+
+        for (self.items.items) |item| {
+            var start: cl.cl_ulong = 0;
+            var end: cl.cl_ulong = 0;
+            try clError(cl.clGetEventProfilingInfo(
+                item.event.event,
+                cl.CL_PROFILING_COMMAND_START,
+                @sizeOf(cl.cl_ulong),
+                &start,
+                null,
+            ));
+            try clError(cl.clGetEventProfilingInfo(
+                item.event.event,
+                cl.CL_PROFILING_COMMAND_END,
+                @sizeOf(cl.cl_ulong),
+                &end,
+                null,
+            ));
+
+            const gop = try ret.getOrPut(alloc, item.kernel_name);
+            if (!gop.found_existing) {
+                gop.key_ptr.* = item.kernel_name;
+                gop.value_ptr.* = 0;
+            }
+
+            gop.value_ptr.* += end - start;
+        }
+
+        return ret;
+    }
+};
+
 pub const Executor = struct {
     context: cl.cl_context,
     device: cl.cl_device_id,
     queue: cl.cl_command_queue,
+    profiling_info: ProfilingInfo,
+
+    const ProfilingInfo = union(enum) {
+        profiling: KernelTimers,
+        non_profiling,
+    };
 
     pub const Buffer = struct {
         buf: cl.cl_mem,
@@ -114,7 +182,12 @@ pub const Executor = struct {
         }
     };
 
-    pub fn init() !Executor {
+    const ProfilingMode = enum {
+        non_profiling,
+        profiling,
+    };
+
+    pub fn init(alloc: std.mem.Allocator, profiling_mode: ProfilingMode) !Executor {
         var platform: cl.cl_platform_id = undefined;
         try clError(cl.clGetPlatformIDs(1, &platform, null));
 
@@ -131,19 +204,34 @@ pub const Executor = struct {
         const context = cl.clCreateContext(null, 1, &device_id, null, null, &cl_err_out);
         try clError(cl_err_out);
 
+        const profiling_properties: []const cl.cl_queue_properties = &.{
+            cl.CL_QUEUE_PROPERTIES, cl.CL_QUEUE_PROFILING_ENABLE,
+            0,
+        };
+
+        const properties = switch (profiling_mode) {
+            .profiling => profiling_properties.ptr,
+            .non_profiling => null,
+        };
+
         const queue = cl.clCreateCommandQueueWithProperties(
             context,
             device_id,
-            null,
+            properties,
             &cl_err_out,
         );
 
         try clError(cl_err_out);
 
+        const profiling_info: ProfilingInfo = switch (profiling_mode) {
+            .profiling => .{ .profiling = try .init(alloc, 100) },
+            .non_profiling => .non_profiling,
+        };
         return .{
             .context = context,
             .device = device_id,
             .queue = queue,
+            .profiling_info = profiling_info,
         };
     }
 
@@ -151,8 +239,23 @@ pub const Executor = struct {
         _ = cl.clReleaseContext(self.context);
     }
 
+    pub fn resetTimers(self: *Executor) void {
+        switch (self.profiling_info) {
+            .profiling => |*timers| timers.reset(),
+            .non_profiling => {},
+        }
+    }
+
+    pub fn getProfilingInfo(self: *Executor, alloc: std.mem.Allocator) !std.StringHashMapUnmanaged(u64) {
+        switch (self.profiling_info) {
+            .profiling => |t| return try t.times(alloc),
+            .non_profiling => return .{},
+        }
+    }
+
     pub const Kernel = struct {
         kernel: cl.cl_kernel,
+        name: []const u8,
 
         pub const Arg = union(enum) {
             local_mem: u32,
@@ -232,6 +335,7 @@ pub const Executor = struct {
 
             return .{
                 .kernel = kernel,
+                .name = name,
             };
         }
     };
@@ -347,8 +451,14 @@ pub const Executor = struct {
         };
     }
 
-    pub fn executeKernelUntracked(self: Executor, kernel: Kernel, num_elems: usize, args: []const Kernel.Arg) !void {
+    pub fn executeKernelUntracked(self: *Executor, alloc: *Alloc, kernel: Kernel, num_elems: usize, args: []const Kernel.Arg) !void {
         const params = try self.prepareKernel(kernel, num_elems, args);
+
+        var event: cl.cl_event = undefined;
+        const event_ptr: ?*cl.cl_event = switch (self.profiling_info) {
+            .profiling => &event,
+            .non_profiling => null,
+        };
 
         try clError(cl.clEnqueueNDRangeKernel(
             self.queue,
@@ -359,8 +469,20 @@ pub const Executor = struct {
             &params.local_size,
             params.num_events_in_wait_list,
             params.wait_event_list,
-            null,
+            event_ptr,
         ));
+
+        if (event_ptr) |p| {
+            errdefer _ = cl.clReleaseEvent(event);
+            try alloc.events.append(p.*);
+        }
+
+        switch (self.profiling_info) {
+            .profiling => |*timers| {
+                try timers.append(kernel.name, .{ .event = event_ptr.?.* });
+            },
+            .non_profiling => {},
+        }
     }
 
     pub fn executeKernel(self: Executor, alloc: *Alloc, kernel: Kernel, num_elems: usize, args: []const Kernel.Arg) !Event {
@@ -381,6 +503,13 @@ pub const Executor = struct {
 
         errdefer _ = cl.clReleaseEvent(event);
         try alloc.events.append(event);
+
+        switch (self.profiling_info) {
+            .profiling => |*timers| {
+                timers.append(kernel.name, event);
+            },
+            .non_profiling => {},
+        }
 
         return .{
             .event = event,

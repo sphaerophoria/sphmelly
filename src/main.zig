@@ -236,7 +236,7 @@ const TrainNotifier = struct {
     alloc: ?sphtud.alloc.BufAllocator = null,
     builder: TrainResponseBuilder = .{},
     cl_alloc: *cl.Alloc,
-    cl_executor: cl.Executor,
+    cl_executor: *cl.Executor,
     tracing_executor: *const math.TracingExecutor,
     cache: struct {
         batch: ?math.Executor.Tensor = null,
@@ -483,9 +483,6 @@ const train_num_images = 200;
 const default_lr = 0.05;
 
 fn trainThread(channels: *SharedChannels) !void {
-    const cl_executor = try cl.Executor.init();
-    defer cl_executor.deinit();
-
     const cl_alloc_buf = try std.heap.page_allocator.alloc(u8, 1 * 1024 * 1024);
     defer std.heap.page_allocator.free(cl_alloc_buf);
 
@@ -493,7 +490,10 @@ fn trainThread(channels: *SharedChannels) !void {
     try cl_alloc.initPinned(cl_alloc_buf);
     defer cl_alloc.deinit();
 
-    const math_executor = try math.Executor.init(&cl_alloc, cl_executor);
+    var cl_executor = try cl.Executor.init(cl_alloc.heap(), .profiling);
+    defer cl_executor.deinit();
+
+    const math_executor = try math.Executor.init(&cl_alloc, &cl_executor);
     var tracing_executor = try math.TracingExecutor.init(math_executor, cl_alloc.heap(), 100);
 
     var notifier = TrainNotifier.init(&cl_alloc, channels, &tracing_executor);
@@ -577,15 +577,29 @@ fn trainThread(channels: *SharedChannels) !void {
     while (true) {
         switch (pause) {
             .unpaused => {
+                cl_executor.resetTimers();
                 tracing_executor.restore(math_checkpoint);
                 cl_alloc.reset(cl_alloc_checkpoint);
 
                 const bars = try barcode_gen.makeBars(&cl_alloc, rand_params, &.{ barcode_size, barcode_size, train_num_images }, &rand_source);
                 try notifier.batchGenerationQueued(bars.imgs, bars.orientations);
 
+                std.debug.print("Batch generated\n", .{});
+
                 const batch_cl_4d = try math_executor.reshape(&cl_alloc, bars.imgs, &.{ barcode_size, barcode_size, 1, train_num_images });
 
                 try trainer.step(batch_cl_4d, bars.orientations);
+
+                try cl_executor.finish();
+
+                const times = try cl_executor.getProfilingInfo(cl_alloc.heap());
+
+                var times_it = times.iterator();
+                std.debug.print("\n\n##START##\n", .{});
+                while (times_it.next()) |entry| {
+                    std.debug.print("{s}: {d}\n", .{ entry.key_ptr.*, entry.value_ptr.* / std.time.ns_per_ms });
+                }
+                std.debug.print("##END##\n\n\n", .{});
             },
             .paused => |pause_cp| {
                 cl_alloc.reset(pause_cp);
