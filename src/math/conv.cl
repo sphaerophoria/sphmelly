@@ -267,7 +267,7 @@ __kernel void make_grad_mirrored_kernel(
 
 // FIXME: This whole thing can probably done by using the gradients as a kernel
 // that is run over the input img
-__kernel void conv_many_grad_kernel(
+__kernel void conv_many_grad_kernel_pass1(
     __global float* in_grad_buf,
     __global float* in_img_buf,
     __global float* out_grad,
@@ -282,7 +282,7 @@ __kernel void conv_many_grad_kernel(
     // Run once per cell in the input kernel
     // in_img (w, h, in_c, n)
     // in_grad (w, y, out_c, n)
-    // out_grad (kw, kh, in_c, out_c)
+    // out_grad (kw, kh, in_c, out_c, n)
 
     // Each cell in the kernel touches every pixel (ish, not on the borders)
 
@@ -290,8 +290,11 @@ __kernel void conv_many_grad_kernel(
 
     uint kernel_channel_size = kw * kh;
     uint kernel_size = kernel_channel_size * in_c;
+    // Kernel_size is one kernel for one output channel
+    // kernel_block_size is all kernels for one output image
+    uint kernel_block_size = kernel_size * out_c;
 
-    if (global_id >= kernel_size * out_c) return;
+    if (global_id >= kernel_block_size * n) return;
 
     uint img_channel_size = w * h;
     uint in_img_size = img_channel_size * in_c;
@@ -300,39 +303,66 @@ __kernel void conv_many_grad_kernel(
     uint kx = global_id % kw;
     uint ky = (global_id % kernel_channel_size) / kw;
     uint input_channel = (global_id % kernel_size) / kernel_channel_size;
-    uint output_channel = global_id / kernel_size;
+    uint output_channel = (global_id % kernel_block_size) / kernel_size;
+    uint img_idx = global_id / kernel_block_size;
 
     int img_x_offs = kx - kw / 2;
     int img_y_offs = ky - kh / 2;
 
     float sum = 0;
-    for (uint img_idx = 0; img_idx < n; img_idx++) {
-        __global float* in_grad_img = in_grad_buf + img_idx * out_img_size;
-        __global float* in_grad_channel = in_grad_img + output_channel * img_channel_size;
 
-        __global float* in_img = in_img_buf + img_idx * in_img_size;
-        __global float* in_img_channel = in_img + input_channel * img_channel_size;
+    __global float* in_grad_img = in_grad_buf + img_idx * out_img_size;
+    __global float* in_grad_channel = in_grad_img + output_channel * img_channel_size;
 
-        for (uint in_grad_y = 0; in_grad_y < h; in_grad_y++) {
-            __global float* in_grad_row = in_grad_channel + w * in_grad_y;
+    __global float* in_img = in_img_buf + img_idx * in_img_size;
+    __global float* in_img_channel = in_img + input_channel * img_channel_size;
 
-            int img_y = in_grad_y + img_y_offs;
-            img_y = max(0, min((int)h - 1, img_y));
-            __global float* in_img_row = in_img_channel + w * img_y;
 
-            for (uint in_grad_x = 0; in_grad_x < w; in_grad_x++) {
-                float in_grad = *(in_grad_row + in_grad_x);
+    for (uint in_grad_y = 0; in_grad_y < h; in_grad_y++) {
+        __global float* in_grad_row = in_grad_channel + w * in_grad_y;
 
-                int img_x = in_grad_x + img_x_offs;
-                img_x = max(0, min((int)w - 1, img_x));
-                float in_img = *(in_img_row + img_x);
+        int img_y = in_grad_y + img_y_offs;
+        img_y = max(0, min((int)h - 1, img_y));
+        __global float* in_img_row = in_img_channel + w * img_y;
 
-                sum += in_img * in_grad;
-            }
+        for (uint in_grad_x = 0; in_grad_x < w; in_grad_x++) {
+            float in_grad = *(in_grad_row + in_grad_x);
+
+            int img_x = in_grad_x + img_x_offs;
+            img_x = max(0, min((int)w - 1, img_x));
+            float in_img = *(in_img_row + img_x);
+
+            sum += in_img * in_grad;
         }
     }
 
     out_grad[global_id] = sum;
+}
+
+__kernel void conv_many_grad_kernel_pass2(
+    __global float* pass1_out,
+    __global float* out,
+    uint kw,
+    uint kh,
+    uint in_c,
+    uint out_c,
+    uint n
+) {
+    // Input is (w, h, in_c, out_c, n)
+    // Output is (w, h, in_c, out_c)
+
+    uint global_id = get_global_id(0);
+    uint kernel_block_size  = kw * kh * in_c * out_c;
+    if (global_id >= kernel_block_size) return;
+
+    float sum = 0;
+    uint kernel_block_offs = global_id % kernel_block_size;
+
+    for (int img_idx = 0; img_idx < n; img_idx++) {
+        sum += pass1_out[kernel_block_size * img_idx + kernel_block_offs];
+    }
+
+    out[global_id] = sum;
 }
 
 __kernel void conv_many_grad_img(
