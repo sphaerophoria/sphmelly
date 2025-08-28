@@ -36,7 +36,8 @@ gaussian_kernel: cl.Executor.Kernel,
 gaussian_noise_kernel: cl.Executor.Kernel,
 masked_conv_kernel: cl.Executor.Kernel,
 conv_many_kernel: cl.Executor.Kernel,
-conv_many_grad_kernel_kernel: cl.Executor.Kernel,
+conv_many_grad_kernel_pass1_kernel: cl.Executor.Kernel,
+conv_many_grad_kernel_pass2_kernel: cl.Executor.Kernel,
 conv_many_grad_img_kernel: cl.Executor.Kernel,
 conv_many_make_grad_mirrored_kernel_kernel: cl.Executor.Kernel,
 transpose_kernel: cl.Executor.Kernel,
@@ -82,7 +83,8 @@ pub fn init(cl_alloc: *cl.Alloc, executor: *cl.Executor) !Executor {
     const conv_program = try executor.createProgram(cl_alloc, conv_program_content);
     const masked_conv_kernel = try conv_program.createKernel(cl_alloc, "masked_conv");
     const conv_many_kernel = try conv_program.createKernel(cl_alloc, "conv_many");
-    const conv_many_grad_kernel_kernel = try conv_program.createKernel(cl_alloc, "conv_many_grad_kernel");
+    const conv_many_grad_kernel_pass1_kernel = try conv_program.createKernel(cl_alloc, "conv_many_grad_kernel_pass1");
+    const conv_many_grad_kernel_pass2_kernel = try conv_program.createKernel(cl_alloc, "conv_many_grad_kernel_pass2");
     const conv_many_grad_img_kernel = try conv_program.createKernel(cl_alloc, "conv_many_grad_img");
     const conv_many_make_grad_mirrored_kernel_kernel = try conv_program.createKernel(cl_alloc, "make_grad_mirrored_kernel");
     return .{
@@ -105,7 +107,8 @@ pub fn init(cl_alloc: *cl.Alloc, executor: *cl.Executor) !Executor {
         .gaussian_noise_kernel = gaussian_noise_kernel,
         .masked_conv_kernel = masked_conv_kernel,
         .conv_many_kernel = conv_many_kernel,
-        .conv_many_grad_kernel_kernel = conv_many_grad_kernel_kernel,
+        .conv_many_grad_kernel_pass1_kernel = conv_many_grad_kernel_pass1_kernel,
+        .conv_many_grad_kernel_pass2_kernel = conv_many_grad_kernel_pass2_kernel,
         .conv_many_grad_img_kernel = conv_many_grad_img_kernel,
         .conv_many_make_grad_mirrored_kernel_kernel = conv_many_make_grad_mirrored_kernel_kernel,
         .transpose_kernel = transpose_kernel,
@@ -723,11 +726,19 @@ pub fn convManyGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_gradients: T
         .{ .uint = kernel_input.dims.get(3) },
     });
 
-    const b_n = b_grad.dims.numElems();
-    try self.executor.executeKernelUntracked(cl_alloc, self.conv_many_grad_kernel_kernel, b_n, &.{
+    const b_grad_pass1 = try self.createTensorUninitialized(cl_alloc, &.{
+        b_grad.dims.get(0),
+        b_grad.dims.get(1),
+        b_grad.dims.get(2),
+        b_grad.dims.get(3),
+        downstream_gradients.dims.get(3),
+    });
+
+    const b_pass1_n = b_grad_pass1.dims.numElems();
+    try self.executor.executeKernelUntracked(cl_alloc, self.conv_many_grad_kernel_pass1_kernel, b_pass1_n, &.{
         .{ .buf = downstream_gradients.buf },
         .{ .buf = img_input.buf },
-        .{ .buf = b_grad.buf },
+        .{ .buf = b_grad_pass1.buf },
         .{ .uint = img_input.dims.get(0) },
         .{ .uint = img_input.dims.get(1) },
         .{ .uint = img_input.dims.get(2) },
@@ -735,6 +746,17 @@ pub fn convManyGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_gradients: T
         .{ .uint = kernel_input.dims.get(0) },
         .{ .uint = kernel_input.dims.get(1) },
         .{ .uint = kernel_input.dims.get(3) },
+    });
+
+    const b_pass2_n = b_grad.dims.numElems();
+    try self.executor.executeKernelUntracked(cl_alloc, self.conv_many_grad_kernel_pass2_kernel, b_pass2_n, &.{
+        .{ .buf = b_grad_pass1.buf },
+        .{ .buf = b_grad.buf },
+        .{ .uint = b_grad_pass1.dims.get(0) },
+        .{ .uint = b_grad_pass1.dims.get(1) },
+        .{ .uint = b_grad_pass1.dims.get(2) },
+        .{ .uint = b_grad_pass1.dims.get(3) },
+        .{ .uint = b_grad_pass1.dims.get(4) },
     });
 
     return .{ a_grad, b_grad };
