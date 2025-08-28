@@ -72,7 +72,7 @@ fn makeSampleBuf(self: BarcodeGen, cl_alloc: *cl.Alloc, rand_source: *math.RandS
     const modules_per_pattern: u32 = @intCast(calcPatternWidth(12));
     const num_modules = modules_per_pattern * num_barcodes;
     const sample_buf = try self.math_executor.createTensorUninitialized(cl_alloc, &.{num_modules});
-    try self.math_executor.executor.executeKernelUntracked(self.module_gen_kernel, num_modules, &.{
+    try self.math_executor.executor.executeKernelUntracked(cl_alloc, self.module_gen_kernel, num_modules, &.{
         .{ .buf = sample_buf.buf },
         .{ .uint = num_barcodes },
         .{ .uint = rand_source.seed },
@@ -107,7 +107,7 @@ fn instanceRandParams(
 
     // This fn call may look like a disaster, but it seems better than trying
     // to coordinate struct layout between zig on host and C on GPU
-    try self.math_executor.executor.executeKernelUntracked(self.sample_params_kernel, num_barcodes, &.{
+    try self.math_executor.executor.executeKernelUntracked(cl_alloc, self.sample_params_kernel, num_barcodes, &.{
         // ret,
         .{ .buf = params_buf.buf },
         // sample_buf_space,
@@ -177,7 +177,7 @@ fn runFirstPass(self: BarcodeGen, cl_alloc: *cl.Alloc, params_buf: math.Executor
     const imgs = try self.math_executor.createTensorUninitialized(cl_alloc, dims);
 
     const n = dims.numElems();
-    try self.math_executor.executor.executeKernelUntracked(self.barcode_gen_kernel, n, &.{
+    try self.math_executor.executor.executeKernelUntracked(cl_alloc, self.barcode_gen_kernel, n, &.{
         .{ .buf = params_buf.buf },
         .{ .buf = imgs.buf },
         .{ .buf = masks.buf },
@@ -195,7 +195,7 @@ fn runFirstPass(self: BarcodeGen, cl_alloc: *cl.Alloc, params_buf: math.Executor
 fn makeBlurKernels(self: BarcodeGen, cl_alloc: *cl.Alloc, kernel_width: u32, num_barcodes: u32, rand_source: *math.RandSource, params: RandomizationParams) !math.Executor.Tensor {
     const kernels = try self.math_executor.createTensorUninitialized(cl_alloc, &.{ kernel_width, kernel_width, num_barcodes });
     const num_elements = kernels.dims.numElems();
-    try self.math_executor.executor.executeKernelUntracked(self.generate_blur_kernels_kernel, num_elements, &.{
+    try self.math_executor.executor.executeKernelUntracked(cl_alloc, self.generate_blur_kernels_kernel, num_elements, &.{
         .{ .buf = kernels.buf },
         .{ .uint = kernel_width },
         .{ .uint = num_elements },

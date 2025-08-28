@@ -294,7 +294,7 @@ pub const Optimizer = struct {
             const item_grad = gradients.get(item.buf);
             const tensor = self.traced.getClTensor(item.buf);
             const weighted_grad = try self.executor.mulScalar(cl_alloc, item_grad, grad_mul);
-            try self.executor.addAssign(tensor, weighted_grad);
+            try self.executor.addAssign(cl_alloc, tensor, weighted_grad);
         }
     }
 };

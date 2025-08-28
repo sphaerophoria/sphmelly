@@ -315,7 +315,7 @@ fn backpropInner(self: TracingExecutor, cl_alloc: *cl.Alloc, id: NodeId, downstr
             const grads = try self.inner.sigmoidGrad(cl_alloc, downstream_gradients, inputs);
 
             // FIXME: This only has to happen if it's a gradient we care about
-            try self.inner.addAssign(gradient_tree.get(source_id), grads);
+            try self.inner.addAssign(cl_alloc, gradient_tree.get(source_id), grads);
 
             try self.backpropInner(cl_alloc, source_id, grads, gradient_tree);
         },
@@ -324,7 +324,7 @@ fn backpropInner(self: TracingExecutor, cl_alloc: *cl.Alloc, id: NodeId, downstr
             const grads = try self.inner.reluGrad(cl_alloc, downstream_gradients, inputs);
 
             // FIXME: This only has to happen if it's a gradient we care about
-            try self.inner.addAssign(gradient_tree.get(source_id), grads);
+            try self.inner.addAssign(cl_alloc, gradient_tree.get(source_id), grads);
 
             try self.backpropInner(cl_alloc, source_id, grads, gradient_tree);
         },
@@ -374,8 +374,8 @@ fn backpropTwoParams(self: TracingExecutor, cl_alloc: *cl.Alloc, params: TwoPara
     const a_grads, const b_grads = try gradFn(self.inner, cl_alloc, downstream_gradients, a, b);
 
     // FIXME: This only has to happen if it's a gradient we care about
-    try self.inner.addAssign(gradient_tree.get(params.a), a_grads);
-    try self.inner.addAssign(gradient_tree.get(params.b), b_grads);
+    try self.inner.addAssign(cl_alloc, gradient_tree.get(params.a), a_grads);
+    try self.inner.addAssign(cl_alloc, gradient_tree.get(params.b), b_grads);
 
     try self.backpropInner(cl_alloc, params.a, a_grads, gradient_tree);
     try self.backpropInner(cl_alloc, params.b, b_grads, gradient_tree);

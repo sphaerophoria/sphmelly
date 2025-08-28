@@ -128,14 +128,14 @@ pub fn main() !void {
     var window: sphwindow.Window = undefined;
     try window.initPinned("sphui demo", 800, 600);
 
-    const cl_executor = try cl.Executor.init();
-    defer cl_executor.deinit();
-
     var cl_alloc: cl.Alloc = undefined;
     try cl_alloc.initPinned(try allocators.root.arena().alloc(u8, 1 * 1024 * 1024));
     defer cl_alloc.deinit();
 
-    const math_executor = try math.Executor.init(&cl_alloc, cl_executor);
+    var cl_executor = try cl.Executor.init(cl_alloc.heap(), .non_profiling);
+    defer cl_executor.deinit();
+
+    const math_executor = try math.Executor.init(&cl_alloc, &cl_executor);
 
     var barcode_gen = try BarcodeGen.init(&cl_alloc, math_executor);
 

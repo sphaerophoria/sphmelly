@@ -236,7 +236,7 @@ const TrainNotifier = struct {
     alloc: ?sphtud.alloc.BufAllocator = null,
     builder: TrainResponseBuilder = .{},
     cl_alloc: *cl.Alloc,
-    cl_executor: cl.Executor,
+    cl_executor: *cl.Executor,
     tracing_executor: *const math.TracingExecutor,
     cache: struct {
         batch: ?math.Executor.Tensor = null,
@@ -483,9 +483,6 @@ const train_num_images = 200;
 const default_lr = 0.05;
 
 fn trainThread(channels: *SharedChannels) !void {
-    const cl_executor = try cl.Executor.init();
-    defer cl_executor.deinit();
-
     const cl_alloc_buf = try std.heap.page_allocator.alloc(u8, 1 * 1024 * 1024);
     defer std.heap.page_allocator.free(cl_alloc_buf);
 
@@ -493,7 +490,12 @@ fn trainThread(channels: *SharedChannels) !void {
     try cl_alloc.initPinned(cl_alloc_buf);
     defer cl_alloc.deinit();
 
-    const math_executor = try math.Executor.init(&cl_alloc, cl_executor);
+    const profiling_mode = cl.Executor.ProfilingMode.non_profiling;
+
+    var cl_executor = try cl.Executor.init(cl_alloc.heap(), profiling_mode);
+    defer cl_executor.deinit();
+
+    const math_executor = try math.Executor.init(&cl_alloc, &cl_executor);
     var tracing_executor = try math.TracingExecutor.init(math_executor, cl_alloc.heap(), 100);
 
     var notifier = TrainNotifier.init(&cl_alloc, channels, &tracing_executor);
@@ -577,6 +579,7 @@ fn trainThread(channels: *SharedChannels) !void {
     while (true) {
         switch (pause) {
             .unpaused => {
+                cl_executor.resetTimers();
                 tracing_executor.restore(math_checkpoint);
                 cl_alloc.reset(cl_alloc_checkpoint);
 
@@ -586,6 +589,8 @@ fn trainThread(channels: *SharedChannels) !void {
                 const batch_cl_4d = try math_executor.reshape(&cl_alloc, bars.imgs, &.{ barcode_size, barcode_size, 1, train_num_images });
 
                 try trainer.step(batch_cl_4d, bars.orientations);
+
+                try cl_executor.finish();
             },
             .paused => |pause_cp| {
                 cl_alloc.reset(pause_cp);
