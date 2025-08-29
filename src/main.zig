@@ -490,7 +490,9 @@ fn trainThread(channels: *SharedChannels) !void {
     try cl_alloc.initPinned(cl_alloc_buf);
     defer cl_alloc.deinit();
 
-    var cl_executor = try cl.Executor.init(cl_alloc.heap(), .profiling);
+    const profiling_mode = cl.Executor.ProfilingMode.non_profiling;
+
+    var cl_executor = try cl.Executor.init(cl_alloc.heap(), profiling_mode);
     defer cl_executor.deinit();
 
     const math_executor = try math.Executor.init(&cl_alloc, &cl_executor);
@@ -584,22 +586,22 @@ fn trainThread(channels: *SharedChannels) !void {
                 const bars = try barcode_gen.makeBars(&cl_alloc, rand_params, &.{ barcode_size, barcode_size, train_num_images }, &rand_source);
                 try notifier.batchGenerationQueued(bars.imgs, bars.orientations);
 
-                std.debug.print("Batch generated\n", .{});
-
                 const batch_cl_4d = try math_executor.reshape(&cl_alloc, bars.imgs, &.{ barcode_size, barcode_size, 1, train_num_images });
 
                 try trainer.step(batch_cl_4d, bars.orientations);
 
                 try cl_executor.finish();
 
-                const times = try cl_executor.getProfilingInfo(cl_alloc.heap());
+                if (profiling_mode == .profiling) {
+                    const times = try cl_executor.getProfilingInfo(cl_alloc.heap());
 
-                var times_it = times.iterator();
-                std.debug.print("\n\n##START##\n", .{});
-                while (times_it.next()) |entry| {
-                    std.debug.print("{s}: {d}\n", .{ entry.key_ptr.*, entry.value_ptr.* / std.time.ns_per_ms });
+                    var times_it = times.iterator();
+                    std.debug.print("\n\n##START##\n", .{});
+                    while (times_it.next()) |entry| {
+                        std.debug.print("{s}: {d}\n", .{ entry.key_ptr.*, entry.value_ptr.* / std.time.ns_per_ms });
+                    }
+                    std.debug.print("##END##\n\n\n", .{});
                 }
-                std.debug.print("##END##\n\n\n", .{});
             },
             .paused => |pause_cp| {
                 cl_alloc.reset(pause_cp);

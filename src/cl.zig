@@ -182,7 +182,7 @@ pub const Executor = struct {
         }
     };
 
-    const ProfilingMode = enum {
+    pub const ProfilingMode = enum {
         non_profiling,
         profiling,
     };
