@@ -219,6 +219,7 @@ struct concrete_params {
     __global float* sample_buf;
     uint img_width;
     uint img_height;
+    uint img_idx;
     float x_scale;
     float y_scale;
     float x_offs;
@@ -235,6 +236,7 @@ struct concrete_params {
 
 __kernel void sample_barcode_params(
     __global struct concrete_params* ret,
+    uint expected_concrete_params_size,
     // size of barcode * n
     __global float* sample_buf_space,
     // Explicit separated output for training labels
@@ -259,12 +261,21 @@ __kernel void sample_barcode_params(
     float max_y_noise_multiplier,
     float min_background_color,
     float max_background_color,
+    uint num_images,
     uint seed,
     ulong ctr_start
 ) {
 
     uint global_id = get_global_id(0);
     if (global_id >= n) return;
+
+    if (sizeof(struct concrete_params) != expected_concrete_params_size) {
+        if (global_id == 0) {
+            printf("Concrete params struct size is %d, expected %d\n", sizeof(struct concrete_params), expected_concrete_params_size);
+        }
+
+        ret[global_id] = (struct concrete_params){0};
+    }
 
     struct philox_thread_rng rng = rngInit(ctr_start + global_id, seed);
 
@@ -285,10 +296,12 @@ __kernel void sample_barcode_params(
     float background_color = randFloatBetween(&rng, min_background_color, max_background_color);
 
     __global float* sample_buf = sample_buf_space + global_id * BARCODE_NUM_MODULES;
+    uint image_idx = randUlongBetween(&rng, 0, num_images);
 
     ret[global_id] = (struct concrete_params) {
         .img_width = img_width,
         .img_height = img_height,
+        .img_idx = image_idx,
         .sample_buf = sample_buf,
         .x_scale = x_scale,
         .y_scale = y_scale,
@@ -339,6 +352,7 @@ __kernel void generate_barcode(
         __global struct concrete_params* all_params,
         __global float* ret,
         __global float* mask_ret,
+        __global float* background_buf,
         uint width,
         uint height,
         uint num_barcodes
@@ -350,10 +364,11 @@ __kernel void generate_barcode(
     uint pixel_id = global_id % (width * height);
 
     struct concrete_params our_params = all_params[barcode_id];
+    uint image_size = width * height;
 
     // Just so early returns don't fall over, maybe causing extra memory io
     // which could be bad maybe i dunno whatever
-    ret[global_id] = our_params.background_color;
+    ret[global_id] = background_buf[our_params.img_idx * width * height + pixel_id];
 
     float crot = cos(our_params.rot);
     float srot = sin(our_params.rot);

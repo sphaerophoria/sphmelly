@@ -186,6 +186,45 @@ pub fn Conv(comptime Executor: type) type {
     };
 }
 
+pub fn MaxPool(comptime Executor: type) type {
+    return struct {
+        name: []const u8,
+        stride: u32,
+
+        const Self = @This();
+
+        const layer_vtable = Layer(Executor).VTable{
+            .getWeights = nullGetWeights(Executor),
+            .execute = execute,
+            .registerWeights = assignIfTracing(Executor, nullRegisterWeights),
+        };
+
+        fn execute(ctx: ?*anyopaque, cl_alloc: *cl.Alloc, executor: *Executor, input: Executor.Tensor) !Executor.Tensor {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            return try executor.maxpool(cl_alloc, input, self.stride);
+        }
+
+        pub fn layer(self: *Self) Layer(Executor) {
+            return .{
+                .vtable = &layer_vtable,
+                .name = self.name,
+                .ctx = self,
+            };
+        }
+    };
+}
+
+pub fn maxpoolLayer(comptime Executor: type, alloc: std.mem.Allocator, stride: u32) !Layer(Executor) {
+    const ret = try alloc.create(MaxPool(Executor));
+
+    ret.* = .{
+        .name = try std.fmt.allocPrint(alloc, "maxpool {d}", .{stride}),
+        .stride = stride,
+    };
+
+    return ret.layer();
+}
+
 pub fn Sigmoid(comptime Executor: type) type {
     return struct {
         const Self = @This();

@@ -16,6 +16,7 @@ pub const squared_err_program_content = @embedFile("squared_err.cl");
 pub const mul_program_content = @embedFile("mul.cl");
 pub const rand_program_content = @embedFile("rand.cl");
 pub const conv_program_content = @embedFile("conv.cl");
+pub const maxpool_program_content = @embedFile("max_pool.cl");
 pub const has_nan_program_content = @embedFile("has_nan.cl");
 
 matmul_kernel: cl.Executor.Kernel,
@@ -41,6 +42,8 @@ conv_many_grad_kernel_pass1_kernel: cl.Executor.Kernel,
 conv_many_grad_kernel_pass2_kernel: cl.Executor.Kernel,
 conv_many_grad_img_kernel: cl.Executor.Kernel,
 conv_many_make_grad_mirrored_kernel_kernel: cl.Executor.Kernel,
+maxpool_kernel: cl.Executor.Kernel,
+maxpool_grad_kernel: cl.Executor.Kernel,
 has_nan_kernel: cl.Executor.Kernel,
 transpose_kernel: cl.Executor.Kernel,
 executor: *cl.Executor,
@@ -90,6 +93,10 @@ pub fn init(cl_alloc: *cl.Alloc, executor: *cl.Executor) !Executor {
     const conv_many_grad_img_kernel = try conv_program.createKernel(cl_alloc, "conv_many_grad_img");
     const conv_many_make_grad_mirrored_kernel_kernel = try conv_program.createKernel(cl_alloc, "make_grad_mirrored_kernel");
 
+    const maxpool_program = try executor.createProgram(cl_alloc, maxpool_program_content);
+    const maxpool_kernel = try maxpool_program.createKernel(cl_alloc, "maxpool");
+    const maxpool_grad_kernel = try maxpool_program.createKernel(cl_alloc, "maxpool_grad");
+
     const has_nan_program = try executor.createProgram(cl_alloc, has_nan_program_content);
     const has_nan_kernel = try has_nan_program.createKernel(cl_alloc, "has_nan");
 
@@ -118,6 +125,8 @@ pub fn init(cl_alloc: *cl.Alloc, executor: *cl.Executor) !Executor {
         .conv_many_grad_img_kernel = conv_many_grad_img_kernel,
         .conv_many_make_grad_mirrored_kernel_kernel = conv_many_make_grad_mirrored_kernel_kernel,
         .transpose_kernel = transpose_kernel,
+        .maxpool_kernel = maxpool_kernel,
+        .maxpool_grad_kernel = maxpool_grad_kernel,
         .has_nan_kernel = has_nan_kernel,
         .executor = executor,
     };
@@ -158,6 +167,7 @@ pub fn reshape(_: Executor, cl_alloc: *cl.Alloc, val: Tensor, new_dims_in: anyty
     };
 
     if (new_dims.numElems() != val.dims.numElems()) {
+        std.log.err("invalid reshape {} -> {}", .{ val.dims, new_dims });
         return error.InvalidDims;
     }
 
@@ -361,7 +371,7 @@ pub fn createTensor(self: Executor, cl_alloc: *cl.Alloc, initial_data: []const f
 
 pub fn createTensorUntracked(self: Executor, cl_alloc: *cl.Alloc, initial_data: []const f32, dims_in: []const u32) !Tensor {
     const params = try self.createTensorCommon(cl_alloc, initial_data, dims_in);
-    try self.executor.writeBufferUntracked(params.buf, std.mem.sliceAsBytes(initial_data));
+    try self.executor.writeBufferUntracked(params.buf, 0, std.mem.sliceAsBytes(initial_data));
 
     return .{
         .buf = params.buf,
@@ -851,6 +861,73 @@ pub fn hasNan(self: Executor, scratch_alloc: *cl.Alloc, in: Tensor) !bool {
     });
     try read_res.event.wait();
     return std.math.isNan(read_res.val[0]);
+}
+
+pub fn maxpool(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, stride: u32) !Tensor {
+    // in: (w, h, c, n)
+    // out: (w / stride, h / stride, c , n)
+
+    if (in.dims.len() != 4) return error.InvalidDims;
+
+    var out_dims_buf: []u32 = try cl_alloc.heap().alloc(u32, 4);
+    out_dims_buf[0] = in.dims.get(0) / stride;
+    out_dims_buf[1] = in.dims.get(1) / stride;
+    out_dims_buf[2] = in.dims.get(2);
+    out_dims_buf[3] = in.dims.get(3);
+
+    const out_dims = math.TensorDims.initRef(out_dims_buf);
+
+    const ret = try self.createTensorUninitialized(cl_alloc, out_dims);
+
+    const n = ret.dims.numElems();
+    try self.executor.executeKernelUntracked(cl_alloc, self.maxpool_kernel, n, &.{
+        .{ .buf = in.buf },
+        .{ .buf = ret.buf },
+        .{ .uint = in.dims.get(0) },
+        .{ .uint = in.dims.get(1) },
+        .{ .uint = stride },
+        .{ .uint = n },
+    });
+
+    return ret;
+}
+
+pub fn maxpoolGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_grads: Tensor, in: Tensor, stride: u32) !Tensor {
+    // downstream shape (out_w, out_h, c, n)
+    // in shape (out_w * stride, out_h * stride, c, n)
+    if (downstream_grads.dims.len() != in.dims.len()) {
+        return error.InvalidDims;
+    }
+
+    if (downstream_grads.dims.get(0) * stride != in.dims.get(0)) {
+        return error.InvalidDims;
+    }
+
+    if (downstream_grads.dims.get(1) * stride != in.dims.get(1)) {
+        return error.InvalidDims;
+    }
+
+    if (downstream_grads.dims.get(2) != in.dims.get(2)) {
+        return error.InvalidDims;
+    }
+
+    if (downstream_grads.dims.get(3) != in.dims.get(3)) {
+        return error.InvalidDims;
+    }
+
+    const out_grads = try self.createTensorFilled(cl_alloc, in.dims, 0.0);
+    const n = downstream_grads.dims.numElems();
+    try self.executor.executeKernelUntracked(cl_alloc, self.maxpool_grad_kernel, n, &.{
+        .{ .buf = downstream_grads.buf },
+        .{ .buf = in.buf },
+        .{ .buf = out_grads.buf },
+        .{ .uint = in.dims.get(0) },
+        .{ .uint = in.dims.get(1) },
+        .{ .uint = stride },
+        .{ .uint = n },
+    });
+
+    return out_grads;
 }
 
 const ClExecutorFixture = struct {
@@ -1656,5 +1733,72 @@ test "hasNan" {
         in_cpu[position] = std.math.nan(f32);
         const in_gpu = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, in_cpu, &.{buf_size});
         try std.testing.expect(try fixture.cl_math.hasNan(fixture.cl_alloc, in_gpu));
+    }
+}
+
+test "maxpool" {
+    var fixture = try ClExecutorFixture.init();
+    defer fixture.deinit();
+
+    const in_cpu = &.{
+        1,  2,  8,  7,
+        3,  4,  5,  6,
+
+        9,  12, 13, 14,
+        10, 11, 15, 16,
+
+        2,  3,  9,  8,
+        4,  5,  6,  7,
+
+        10, 13, 14, 15,
+        11, 12, 16, 17,
+    };
+
+    const downstream_grads = &.{
+        1, 2,
+        3, 4,
+
+        5, 6,
+        7, 8,
+    };
+
+    const in_gpu = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, in_cpu, &.{ 4, 2, 2, 2 });
+    const downstream_grads_gpu = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, downstream_grads, &.{ 2, 1, 2, 2 });
+    const out_gpu = try fixture.cl_math.maxpool(fixture.cl_alloc, in_gpu, 2);
+    const grads_gpu = try fixture.cl_math.maxpoolGrad(fixture.cl_alloc, downstream_grads_gpu, in_gpu, 2);
+
+    const expected_dims = math.TensorDims.initRef(&.{ 2, 1, 2, 2 });
+    try std.testing.expect(out_gpu.dims.eql(expected_dims));
+
+    const out_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, out_gpu);
+    const grads_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, grads_gpu);
+    const expected: []const f32 = &.{
+        4,  8,
+        12, 16,
+
+        5,  9,
+        13, 17,
+    };
+
+    for (expected, out_cpu) |ex, ac| {
+        try std.testing.expectApproxEqAbs(ex, ac, 0.0001);
+    }
+
+    const expected_grads: []const f32 = &.{
+        0, 0, 2, 0,
+        0, 1, 0, 0,
+
+        0, 3, 0, 0,
+        0, 0, 0, 4,
+
+        0, 0, 6, 0,
+        0, 5, 0, 0,
+
+        0, 7, 0, 0,
+        0, 0, 0, 8,
+    };
+
+    for (expected_grads, grads_cpu) |ex, ac| {
+        try std.testing.expectApproxEqAbs(ex, ac, 0.0001);
     }
 }

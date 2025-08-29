@@ -47,85 +47,41 @@ pub const CpuImage = struct {
     }
 };
 
-pub fn OrientationRenderer(comptime Action: type) type {
-    return struct {
-        orientation_buffer: sphrender.xyt_program.Buffer,
-        orientation_render_source: sphrender.xyt_program.RenderSource,
-        orientation_renderer: *sphrender.xyt_program.SolidColorProgram,
-        color: gui.Color,
-        size: u31 = 0,
-
-        const Self = @This();
-
-        const vtable = gui.Widget(Action).VTable{
-            .render = render,
-            .getSize = getSize,
-            .update = update,
-            .setInputState = null,
-            .setFocused = null,
-            .reset = null,
-        };
-
-        pub fn asWidget(self: *Self) gui.Widget(Action) {
-            return .{
-                .ctx = self,
-                .name = "OrientationRenderer",
-                .vtable = &vtable,
-            };
-        }
-
-        pub fn setOrientation(self: *Self, orientation: [2]f32) void {
-            self.orientation_buffer.updateBuffer(&.{
-                .{ .vPos = .{ 0, 0 } },
-                .{ .vPos = .{ orientation[0], orientation[1] } },
-            });
-        }
-
-        fn render(ctx: ?*anyopaque, widget_bounds: gui.PixelBBox, window_bounds: gui.PixelBBox) void {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-
-            const txfm = gui.util.widgetToClipTransform(widget_bounds, window_bounds);
-
-            self.orientation_renderer.renderLines(self.orientation_render_source, .{
-                .color = .{ self.color.r, self.color.g, self.color.b },
-                .transform = txfm.inner,
-            });
-        }
-
-        fn getSize(ctx: ?*anyopaque) gui.PixelSize {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-            return .{
-                .width = self.size,
-                .height = self.size,
-            };
-        }
-
-        fn update(ctx: ?*anyopaque, available_size: gui.PixelSize, delta_s: f32) anyerror!void {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-            _ = delta_s;
-            self.size = @min(available_size.width, available_size.height);
-        }
-    };
-}
-
-pub fn orientationRenderer(comptime Action: type, alloc: sphrender.RenderAlloc, solid_color_renderer: *sphrender.xyt_program.SolidColorProgram, color: gui.Color) !*OrientationRenderer(Action) {
-    const widget = try alloc.heap.arena().create(OrientationRenderer(Action));
-    const orientation_buffer = try sphrender.xyt_program.Buffer.init(alloc.gl, &.{
+pub fn makeOrientationBuffer(gl_alloc: *sphrender.GlAlloc, orientation: [2]f32, solid_color_renderer: *sphrender.xyt_program.SolidColorProgram) !sphrender.xyt_program.RenderSource {
+    const orientation_buffer = try sphrender.xyt_program.Buffer.init(gl_alloc, &.{
         .{ .vPos = .{ 0, 0 } },
-        .{ .vPos = .{ 0, 0 } },
+        .{ .vPos = .{ orientation[0], orientation[1] } },
     });
-    var orientation_render_source = try sphrender.xyt_program.RenderSource.init(alloc.gl);
+
+    var orientation_render_source = try sphrender.xyt_program.RenderSource.init(gl_alloc);
     orientation_render_source.bindData(solid_color_renderer.handle(), orientation_buffer);
     orientation_render_source.setLen(2);
 
-    widget.* = OrientationRenderer(Action){
-        .orientation_buffer = orientation_buffer,
-        .orientation_render_source = orientation_render_source,
-        .orientation_renderer = solid_color_renderer,
-        .color = color,
-    };
-    return widget;
+    return orientation_render_source;
 }
+
+pub const ImageRenderContext = struct {
+    fbo: sphrender.FramebufferRenderContext,
+    temporary_viewport: sphrender.TemporaryViewport,
+
+    pub fn init(image: GlImage) !ImageRenderContext {
+        const fbo = try sphrender.FramebufferRenderContext.init(image.tex, null);
+        fbo.bind();
+
+        const temporary_viewport = sphrender.TemporaryViewport.init();
+        temporary_viewport.setViewport(@intCast(image.width), @intCast(image.height));
+
+        return .{
+            .fbo = fbo,
+            .temporary_viewport = temporary_viewport,
+        };
+    }
+
+    pub fn reset(self: ImageRenderContext) void {
+        self.temporary_viewport.reset();
+        self.fbo.reset();
+    }
+};
 
 pub fn ImageView(comptime Action: type) type {
     return struct {
@@ -357,6 +313,10 @@ pub fn greyTensorToRgbaCpu(alloc: std.mem.Allocator, img_tensor: math.Tensor([]f
 }
 
 pub fn gradTensorToRgbaCpu(alloc: std.mem.Allocator, data: []const f32, dims: []const u32, mul: f32) !CpuImage {
+    return gradTensorToRgbaCpuAlpha(alloc, data, dims, mul, 1.0);
+}
+
+pub fn gradTensorToRgbaCpuAlpha(alloc: std.mem.Allocator, data: []const f32, dims: []const u32, mul: f32, alpha: f32) !CpuImage {
     var size = dims[0];
     for (dims[1..]) |v| {
         size *= v;
@@ -365,12 +325,13 @@ pub fn gradTensorToRgbaCpu(alloc: std.mem.Allocator, data: []const f32, dims: []
     const img_cpu_rgba: []u8 = try alloc.alloc(u8, size * 4);
 
     for (0..data.len) |i| {
-        const abs: u8 = @intFromFloat(@max(0, @min(@abs(255 * data[i] * mul), 255)));
+        const abs_scaled_data = @abs(std.math.clamp(data[i] * mul, -1, 1));
+        const abs: u8 = @intFromFloat(abs_scaled_data * 255.0);
         if (std.math.isNan(data[i])) {
             img_cpu_rgba[i * 4 + 0] = 0;
             img_cpu_rgba[i * 4 + 1] = 255;
             img_cpu_rgba[i * 4 + 2] = 0;
-        } else if (data[i] < 0) {
+        } else if (data[i] * mul < 0) {
             img_cpu_rgba[i * 4 + 0] = 0;
             img_cpu_rgba[i * 4 + 1] = 0;
             img_cpu_rgba[i * 4 + 2] = abs;
@@ -379,7 +340,7 @@ pub fn gradTensorToRgbaCpu(alloc: std.mem.Allocator, data: []const f32, dims: []
             img_cpu_rgba[i * 4 + 1] = 0;
             img_cpu_rgba[i * 4 + 2] = 0;
         }
-        img_cpu_rgba[i * 4 + 3] = 255;
+        img_cpu_rgba[i * 4 + 3] = @intFromFloat(abs_scaled_data * alpha * 255);
     }
 
     return CpuImage{

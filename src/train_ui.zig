@@ -32,8 +32,6 @@ pub const Gui = struct {
     pub fn clear(self: *Gui) !void {
         try self.widgets.image_view.setImg(.null_img);
         self.params.current_img_data = .null_img;
-        self.widgets.orientation.setOrientation(.{ 0, 0 });
-        self.widgets.predicted_orientation.setOrientation(.{ 0, 0 });
     }
 
     pub fn setImageGrayscale(self: *Gui, scratch: std.mem.Allocator, img: CpuTensor) !void {
@@ -52,6 +50,19 @@ pub const Gui = struct {
             .data = img.buf,
             .width = img.dims.get(0),
         };
+    }
+
+    pub fn addImgOverlayHotCold(self: *Gui, scratch: std.mem.Allocator, scratch_gl: *sphtud.render.GlAlloc, overlay: CpuTensor, extra_mul: f32) !void {
+        const rgba = try tsv.gradTensorToRgbaCpuAlpha(scratch, overlay.buf, overlay.dims.inner, self.params.grad_mul * extra_mul, 0.5);
+
+        const render_ctx = try tsv.ImageRenderContext.init(self.widgets.image_view.image);
+        defer render_ctx.reset();
+
+        const gl_cp = scratch_gl.checkpoint();
+        defer scratch_gl.restore(gl_cp);
+
+        const overlay_tex = try sphtud.render.makeTextureFromRgba(scratch_gl, rgba.data, rgba.width);
+        self.widgets.image_view.image_renderer.renderTexture(overlay_tex, .identity);
     }
 
     pub fn step(ui: *Gui, width: u31, height: u31) !?GuiAction {
@@ -132,8 +143,6 @@ const CpuTensor = math.Tensor([]f32);
 
 const Widgets = struct {
     image_view: *tsv.ImageView(GuiAction),
-    orientation: *tsv.OrientationRenderer(GuiAction),
-    predicted_orientation: *tsv.OrientationRenderer(GuiAction),
     runner: sphtud.ui.runner.Runner(GuiAction),
 };
 
@@ -150,13 +159,6 @@ fn makeGuiWidgets(gui_alloc: sphtud.ui.GuiAlloc, scratch: *sphtud.alloc.BufAlloc
     const solid_color_renderer = try gui_alloc.heap.arena().create(sphtud.render.xyt_program.SolidColorProgram);
     solid_color_renderer.* = try sphtud.render.xyt_program.solidColorProgram(gui_alloc.gl);
     var image_view = try makeImageView(gui_alloc, gui_state);
-    var predicted_widget = try tsv.orientationRenderer(GuiAction, gui_alloc, solid_color_renderer, .{ .r = 0, .g = 0, .b = 1, .a = 1 });
-    var actual_widget = try tsv.orientationRenderer(GuiAction, gui_alloc, solid_color_renderer, .{ .r = 1, .g = 0, .b = 0, .a = 1 });
-
-    const image_stack = try widget_factory.makeStack(3);
-    try image_stack.pushWidget(image_view.asWidget(), .{});
-    try image_stack.pushWidget(actual_widget.asWidget(), .{ .vertical_justify = .center, .horizontal_justify = .center });
-    try image_stack.pushWidget(predicted_widget.asWidget(), .{ .vertical_justify = .center, .horizontal_justify = .center });
 
     const left_to_right = try widget_factory.makeLayout();
     left_to_right.cursor.direction = .left_to_right;
@@ -203,16 +205,12 @@ fn makeGuiWidgets(gui_alloc: sphtud.ui.GuiAlloc, scratch: *sphtud.alloc.BufAlloc
 
     try right_layout.pushWidget(try widget_factory.makeLabel(TrainingMetaRetriever{
         .img_loss = &gui_params.img_loss,
-        .predicted = &gui_params.img_predicted,
-        .ground_truth = &gui_params.img_ground_truth,
     }));
 
-    try right_layout.pushWidget(image_stack.asWidget());
+    try right_layout.pushWidget(image_view.asWidget());
 
     return .{
         .image_view = image_view,
-        .orientation = actual_widget,
-        .predicted_orientation = predicted_widget,
         .runner = try widget_factory.makeRunner(left_to_right.asWidget()),
     };
 }
@@ -281,16 +279,12 @@ const LossLabelRetriever = struct {
 
 const TrainingMetaRetriever = struct {
     img_loss: *f32,
-    predicted: *[2]f32,
-    ground_truth: *[2]f32,
     buf: [200]u8 = undefined,
 
     pub fn getText(self: *TrainingMetaRetriever) []const u8 {
         return std.fmt.bufPrint(&self.buf,
             \\Elem loss: {d}
-            \\predicted: {d} {d}
-            \\actual: {d} {d}
-        , .{ self.img_loss.*, self.predicted[0], self.predicted[1], self.ground_truth[0], self.ground_truth[1] }) catch &self.buf;
+        , .{self.img_loss.*}) catch &self.buf;
     }
 };
 
@@ -317,8 +311,6 @@ const GuiParams = struct {
     current_layer: u32 = 0,
     current_param: u32 = 0,
     img_loss: f32 = 0.0,
-    img_predicted: [2]f32 = @splat(0),
-    img_ground_truth: [2]f32 = @splat(0),
     num_layers: u32 = 0,
     grad_mul: f32 = 1.0,
     view_mode: ViewMode = .training_sample,

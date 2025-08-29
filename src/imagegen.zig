@@ -20,6 +20,7 @@ const CpuImage = tsv.CpuImage;
 const GuiAction = union(enum) {
     request_image_stat: ImagePixelPos,
     selected_image: usize,
+    toggle_mask,
     seed: usize,
 
     fn generateSeed(val: usize) GuiAction {
@@ -35,10 +36,14 @@ const GuiAction = union(enum) {
             .request_image_stat = pos,
         };
     }
+
+    fn generateToggleMask(val: bool) GuiAction {
+        return .{ .toggle_mask = val };
+    }
 };
 
 const ImageDimsRetriever = struct {
-    image: GlImage,
+    image: *const GlImage,
     buf: [12]u8,
 
     pub fn getText(self: *ImageDimsRetriever) []const u8 {
@@ -49,10 +54,12 @@ const ImageDimsRetriever = struct {
 const ImageUpdater = struct {
     barcode_gen: *BarcodeGen,
     cl_alloc: *cl.Alloc,
+    scratch_gl: *sphrender.GlAlloc,
     scratch: std.mem.Allocator,
     math_executor: math.Executor,
     image_view: *tsv.ImageView(GuiAction),
-    orientation_view: *tsv.OrientationRenderer(GuiAction),
+    solid_color_renderer: *sphrender.xyt_program.SolidColorProgram,
+    visualize_mask: bool,
 
     seed: u64,
     selected_image: usize = 0,
@@ -103,23 +110,90 @@ const ImageUpdater = struct {
             .ctr = 0,
             .seed = @intCast(self.seed % (1 << 32)),
         };
+
         const bars = try self.barcode_gen.makeBars(
             self.cl_alloc,
             self.param_gen,
-            &.{ 64, 64, num_images },
+            num_images,
             &rand_source,
         );
 
         try self.math_executor.executor.finish();
 
-        const cpu_image = try self.tensorToRgbaCpu(bars.imgs);
+        const source_img = if (self.visualize_mask) bars.masks else bars.imgs;
+        const cpu_image = try self.tensorToRgbaCpu(source_img);
         const cpu_orientation = try self.extractOrientation(bars.orientations);
 
         gl.glLineWidth(5.0);
+
         try self.image_view.setImg(cpu_image);
-        self.orientation_view.setOrientation(cpu_orientation);
+
+        const gl_cp = self.scratch_gl.checkpoint();
+        defer self.scratch_gl.restore(gl_cp);
+
+        const render_ctx = try tsv.ImageRenderContext.init(self.image_view.image);
+        defer render_ctx.reset();
+
+        const render_source = try tsv.makeOrientationBuffer(self.scratch_gl, cpu_orientation, self.solid_color_renderer);
+        self.solid_color_renderer.renderLines(render_source, .{
+            .color = .{ 1.0, 0.0, 0.0 },
+            .transform = sphtud.math.Transform.identity.inner,
+        });
     }
 };
+
+const Args = struct {
+    background_dir: []const u8,
+
+    const Switch = enum {
+        @"--background-dir",
+    };
+
+    fn parse(alloc: std.mem.Allocator) !Args {
+        var it = try std.process.argsWithAllocator(alloc);
+
+        const process_name = it.next() orelse "imagegen";
+
+        var background_dir: ?[]const u8 = null;
+
+        while (it.next()) |arg| {
+            const s = std.meta.stringToEnum(Switch, arg) orelse {
+                std.log.err("{s} is not a valid argument", .{arg});
+                help(process_name);
+            };
+
+            switch (s) {
+                .@"--background-dir" => background_dir = it.next() orelse {
+                    std.log.err("Missing background dir arg", .{});
+                    help(process_name);
+                },
+            }
+        }
+
+        return .{
+            .background_dir = background_dir orelse {
+                std.log.err("background dir not provided", .{});
+                help(process_name);
+            },
+        };
+    }
+
+    fn help(process_name: []const u8) noreturn {
+        const stdout = std.io.getStdOut();
+
+        stdout.writer().print(
+            \\USAGE: {s} [ARGS]
+            \\
+            \\Required args:
+            \\--background-dir: Where to load image backgrounds from
+            \\
+        , .{process_name}) catch {};
+
+        std.process.exit(1);
+    }
+};
+
+const img_size = 256;
 
 pub fn main() !void {
     var allocators: sphrender.AppAllocators(100) = undefined;
@@ -135,9 +209,11 @@ pub fn main() !void {
     var cl_executor = try cl.Executor.init(cl_alloc.heap(), .non_profiling);
     defer cl_executor.deinit();
 
+    const args = try Args.parse(allocators.root.arena());
+
     const math_executor = try math.Executor.init(&cl_alloc, &cl_executor);
 
-    var barcode_gen = try BarcodeGen.init(&cl_alloc, math_executor);
+    var barcode_gen = try BarcodeGen.init(allocators.scratch.linear(), &cl_alloc, math_executor, args.background_dir, img_size);
 
     gl.glEnable(gl.GL_SCISSOR_TEST);
     gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA);
@@ -162,21 +238,20 @@ pub fn main() !void {
         .onReqStat = &GuiAction.generateRequestImageStat,
     };
 
-    var orientation_view = try tsv.orientationRenderer(GuiAction, gui_alloc, &solid_color_renderer, .{ .r = 1, .g = 0, .b = 0, .a = 1 });
-
     var image_view_updater = ImageUpdater{
         .barcode_gen = &barcode_gen,
         .cl_alloc = &cl_alloc,
         .scratch = allocators.scratch.allocator(),
+        .scratch_gl = &allocators.scratch_gl,
         .math_executor = math_executor,
         .image_view = &image_view,
-        .orientation_view = orientation_view,
+        .solid_color_renderer = &solid_color_renderer,
         .param_gen = .{
             // FIXME offset range should probably be a ratio of image size, not absolute pixels
             .x_offs_range = .{ -50, 50 },
             .y_offs_range = .{ -50, 50 },
-            .x_scale_range = .{ 2.0, 3.0 },
-            .aspect_range = .{ 1.0, 2.0 },
+            .x_scale_range = .{ 0.2, 0.4 },
+            .aspect_range = .{ 0.4, 1.0 },
             .min_contrast = 0.2,
             .x_noise_multiplier_range = .{ 5.0, 10.1 },
             .y_noise_multiplier_range = .{ 5.0, 10.1 },
@@ -187,6 +262,7 @@ pub fn main() !void {
             .blur_stddev_range = .{ 0.0001, 3.0 },
         },
         .seed = 0,
+        .visualize_mask = false,
     };
 
     try image_view_updater.update();
@@ -194,7 +270,7 @@ pub fn main() !void {
     const widget_factory = gui_state.factory(gui_alloc);
     const layout = try widget_factory.makeLayout();
     try layout.pushWidget(try widget_factory.makeLabel(ImageDimsRetriever{
-        .image = image_view.image,
+        .image = &image_view.image,
         .buf = undefined,
     }));
 
@@ -202,11 +278,10 @@ pub fn main() !void {
     try layout.pushWidget(try widget_factory.makeDrag(u64, &image_view_updater.seed, &GuiAction.generateSeed, 1, 5));
     try layout.pushWidget(try widget_factory.makeLabel("selected"));
     try layout.pushWidget(try widget_factory.makeDrag(usize, &image_view_updater.selected_image, &GuiAction.generateSelectedImage, 1, 5));
+    try layout.pushWidget(try widget_factory.makeLabel("Visualize mask"));
+    try layout.pushWidget(try widget_factory.makeCheckbox(&image_view_updater.visualize_mask, GuiAction.toggle_mask));
 
-    const image_view_stack = try widget_factory.makeStack(2);
-    try image_view_stack.pushWidget(image_view.asWidget(), .{});
-    try image_view_stack.pushWidget(orientation_view.asWidget(), .{ .vertical_justify = .center, .horizontal_justify = .center });
-    try layout.pushWidget(image_view_stack.asWidget());
+    try layout.pushWidget(image_view.asWidget());
 
     var runner = try widget_factory.makeRunner(layout.asWidget());
 
@@ -234,6 +309,10 @@ pub fn main() !void {
             },
             .seed => |val| {
                 image_view_updater.seed = val;
+                try image_view_updater.update();
+            },
+            .toggle_mask => {
+                image_view_updater.visualize_mask = !image_view_updater.visualize_mask;
                 try image_view_updater.update();
             },
         };

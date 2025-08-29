@@ -377,12 +377,12 @@ pub const Executor = struct {
         }
     };
 
-    pub fn writeBufferUntracked(self: Executor, buf: Buffer, content: []const u8) !void {
+    pub fn writeBufferUntracked(self: Executor, buf: Buffer, offset: usize, content: []const u8) !void {
         try clError(cl.clEnqueueWriteBuffer(
             self.queue,
             buf.buf,
             cl.CL_FALSE,
-            0,
+            offset,
             content.len,
             content.ptr,
             0,
@@ -391,13 +391,13 @@ pub const Executor = struct {
         ));
     }
 
-    pub fn writeBuffer(self: Executor, alloc: *Alloc, buf: Buffer, content: []const u8) !Event {
+    pub fn writeBuffer(self: Executor, alloc: *Alloc, buf: Buffer, offset: usize, content: []const u8) !Event {
         var event: cl.cl_event = undefined;
         try clError(cl.clEnqueueWriteBuffer(
             self.queue,
             buf.buf,
             cl.CL_FALSE,
-            0,
+            offset,
             content.len,
             content.ptr,
             0,

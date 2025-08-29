@@ -7,6 +7,16 @@ fn generateConvTestData(b: *std.Build) std.Build.LazyPath {
     return cmd.captureStdOut();
 }
 
+fn addCommonDependencies(b: *std.Build, exe: *std.Build.Step.Compile, sphtud_mod: *std.Build.Module) void {
+    exe.root_module.addImport("sphtud", sphtud_mod);
+    exe.root_module.addCSourceFile(.{
+        .file = b.path("src/stb_image.c"),
+    });
+    exe.root_module.addIncludePath(b.path("src"));
+    exe.linkSystemLibrary("OpenCL");
+    exe.linkLibC();
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -15,15 +25,15 @@ pub fn build(b: *std.Build) void {
         .with_gl = true,
         .with_glfw = true,
     });
+    const sphtud_mod = sphtud.module("sphtud");
+
     const exe = b.addExecutable(.{
         .name = "sphmelly",
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-    exe.root_module.addImport("sphtud", sphtud.module("sphtud"));
-    exe.linkSystemLibrary("OpenCL");
-    exe.linkLibC();
+    addCommonDependencies(b, exe, sphtud_mod);
 
     const imagegen = b.addExecutable(.{
         .name = "imagegen",
@@ -31,9 +41,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    imagegen.root_module.addImport("sphtud", sphtud.module("sphtud"));
-    imagegen.linkSystemLibrary("OpenCL");
-    imagegen.linkLibC();
+    addCommonDependencies(b, imagegen, sphtud_mod);
 
     const conv_test_data = generateConvTestData(b);
 
@@ -43,12 +51,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    addCommonDependencies(b, test_exe, sphtud_mod);
     test_exe.root_module.addAnonymousImport("conv_test_data", .{
         .root_source_file = conv_test_data,
     });
-    test_exe.root_module.addImport("sphtud", sphtud.module("sphtud"));
-    test_exe.linkSystemLibrary("OpenCL");
-    test_exe.linkLibC();
 
     b.installArtifact(test_exe);
     b.installArtifact(exe);

@@ -1,12 +1,18 @@
+const sphtud = @import("sphtud");
 const std = @import("std");
 const cl = @import("cl.zig");
 const math = @import("math.zig");
+const stbi = @cImport({
+    @cInclude("stb_image.h");
+});
 
 math_executor: math.Executor,
 module_gen_kernel: cl.Executor.Kernel,
 barcode_gen_kernel: cl.Executor.Kernel,
 sample_params_kernel: cl.Executor.Kernel,
 generate_blur_kernels_kernel: cl.Executor.Kernel,
+backgrounds: math.Executor.Tensor,
+background_size: u32,
 
 const barcode_gen_program_source = math.Executor.rand_program_content ++ @embedFile("BarcodeGen/generate.cl");
 
@@ -25,18 +31,23 @@ pub const RandomizationParams = struct {
     blur_stddev_range: [2]f32,
 };
 
-pub fn init(cl_alloc: *cl.Alloc, math_executor: math.Executor) !BarcodeGen {
+pub fn init(scratch: sphtud.alloc.LinearAllocator, cl_alloc: *cl.Alloc, math_executor: math.Executor, background_image_dir: []const u8, img_width: u32) !BarcodeGen {
     const program = try math_executor.executor.createProgram(cl_alloc, barcode_gen_program_source);
     const barcode_gen_kernel = try program.createKernel(cl_alloc, "generate_barcode");
     const module_gen_kernel = try program.createKernel(cl_alloc, "generate_module_patterns");
     const sample_params_kernel = try program.createKernel(cl_alloc, "sample_barcode_params");
     const generate_blur_kernels_kernel = try program.createKernel(cl_alloc, "generate_blur_kernels");
+
+    const backgrounds = try makeBackgroundImgBuf(scratch, cl_alloc, math_executor, background_image_dir, img_width);
+
     return .{
         .math_executor = math_executor,
         .barcode_gen_kernel = barcode_gen_kernel,
         .module_gen_kernel = module_gen_kernel,
         .sample_params_kernel = sample_params_kernel,
         .generate_blur_kernels_kernel = generate_blur_kernels_kernel,
+        .backgrounds = backgrounds,
+        .background_size = img_width,
     };
 }
 
@@ -46,11 +57,8 @@ const Bars = struct {
     orientations: math.Executor.Tensor,
 };
 
-pub fn makeBars(self: BarcodeGen, cl_alloc: *cl.Alloc, rand_params: RandomizationParams, dims: anytype, rand_source: *math.RandSource) !Bars {
-    const out_dims = try math.TensorDims.init(cl_alloc.heap(), dims);
-    if (out_dims.len() != 3) {
-        return error.InvalidDims;
-    }
+pub fn makeBars(self: BarcodeGen, cl_alloc: *cl.Alloc, rand_params: RandomizationParams, num_images: u32, rand_source: *math.RandSource) !Bars {
+    const out_dims = try math.TensorDims.init(cl_alloc.heap(), &.{ self.background_size, self.background_size, num_images });
 
     const num_barcodes = out_dims.get(2);
 
@@ -98,7 +106,7 @@ fn instanceRandParams(
     dims: math.TensorDims,
 ) !RandParams {
     const num_barcodes = dims.get(2);
-    const params_struct_size = 60;
+    const params_struct_size = 72;
     const total_params_buf_size = params_struct_size * num_barcodes;
     const params_buf = try self.math_executor.createTensorUninitialized(cl_alloc, &.{total_params_buf_size});
 
@@ -110,6 +118,8 @@ fn instanceRandParams(
     try self.math_executor.executor.executeKernelUntracked(cl_alloc, self.sample_params_kernel, num_barcodes, &.{
         // ret,
         .{ .buf = params_buf.buf },
+        // expected params size
+        .{ .uint = params_struct_size },
         // sample_buf_space,
         .{ .buf = sample_buf.buf },
         // orientations_out
@@ -154,6 +164,8 @@ fn instanceRandParams(
         .{ .float = rand_params.background_color_range[0] },
         // max_background_color,
         .{ .float = rand_params.background_color_range[1] },
+        // num_images
+        .{ .uint = self.backgrounds.dims.get(2) },
         // seed,
         .{ .uint = rand_source.seed },
         // ctr_start
@@ -181,6 +193,7 @@ fn runFirstPass(self: BarcodeGen, cl_alloc: *cl.Alloc, params_buf: math.Executor
         .{ .buf = params_buf.buf },
         .{ .buf = imgs.buf },
         .{ .buf = masks.buf },
+        .{ .buf = self.backgrounds.buf },
         .{ .uint = dims.get(0) },
         .{ .uint = dims.get(1) },
         .{ .uint = dims.get(2) },
@@ -219,4 +232,79 @@ const barcode_constants = struct {
 
 fn calcPatternWidth(len: usize) usize {
     return len * 7 + barcode_constants.extra_width + barcode_constants.quiet_zone_space;
+}
+
+fn loadImgScaledCpu(img_path: [:0]const u8, out_width: usize, out: []f32) !void {
+    var in_width: i32 = 0;
+    var in_height: i32 = 0;
+    const data_ptr = stbi.stbi_load(img_path, &in_width, &in_height, null, 1);
+    if (data_ptr == null) return error.OpenImage;
+
+    defer stbi.stbi_image_free(data_ptr);
+
+    const in_width_u: usize = @intCast(in_width);
+    const in_width_f: f32 = @floatFromInt(in_width);
+    const in_height_f: f32 = @floatFromInt(in_height);
+    const out_width_f: f32 = @floatFromInt(out_width);
+    const out_height_f: f32 = @floatFromInt(out.len / out_width);
+
+    for (out, 0..) |*out_v, i| {
+        const out_x: f32 = @floatFromInt(i % out_width);
+        const out_y: f32 = @floatFromInt(i / out_width);
+
+        const in_x: usize = @intFromFloat(out_x / out_width_f * in_width_f);
+        const in_y: usize = @intFromFloat(out_y / out_height_f * in_height_f);
+
+        const val_u8 = data_ptr[in_y * in_width_u + in_x];
+        out_v.* = @as(f32, @floatFromInt(val_u8)) / 255.0;
+    }
+}
+
+fn makeBackgroundImgBuf(scratch: sphtud.alloc.LinearAllocator, cl_alloc: *cl.Alloc, math_executor: math.Executor, background_image_dir: []const u8, out_img_width: u32) !math.Executor.Tensor {
+    var dir = try std.fs.cwd().openDir(background_image_dir, .{ .iterate = true });
+    defer dir.close();
+
+    const cp = scratch.checkpoint();
+    defer scratch.restore(cp);
+
+    var it = dir.iterate();
+
+    var image_paths = try sphtud.util.RuntimeSegmentedList([:0]const u8).init(
+        scratch.allocator(),
+        scratch.allocator(),
+        100,
+        10000,
+    );
+
+    while (try it.next()) |entry| {
+        const cwd_rel_path = try std.fmt.allocPrintZ(scratch.allocator(), "{s}/{s}", .{ background_image_dir, entry.name });
+        try image_paths.append(cwd_rel_path);
+    }
+
+    const backgrounds = try math_executor.createTensorFilled(
+        cl_alloc,
+        &.{ out_img_width, out_img_width, @as(u32, @intCast(image_paths.len)) },
+        std.math.nan(f32),
+    );
+
+    const out_img_num_elems = out_img_width * out_img_width;
+    const out_img_size_bytes = out_img_num_elems * @sizeOf(f32);
+
+    var path_it = image_paths.iter();
+    const cpu_f32: []f32 = try scratch.allocator().alloc(f32, out_img_num_elems);
+
+    const cl_alloc_cp = cl_alloc.checkpoint();
+    defer cl_alloc.reset(cl_alloc_cp);
+
+    var img_offset: usize = 0;
+    while (path_it.next()) |path| {
+        defer img_offset += out_img_size_bytes;
+
+        try loadImgScaledCpu(path.*, out_img_width, cpu_f32);
+
+        const res = try math_executor.executor.writeBuffer(cl_alloc, backgrounds.buf, img_offset, std.mem.sliceAsBytes(cpu_f32));
+        try res.wait();
+    }
+
+    return backgrounds;
 }
