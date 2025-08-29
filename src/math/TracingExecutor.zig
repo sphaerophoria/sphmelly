@@ -22,6 +22,10 @@ const Operation = union(enum) {
         in: NodeId,
         dim: usize,
     },
+    maxpool: struct {
+        in: NodeId,
+        stride: u32,
+    },
     reshape: NodeId,
     squared_err: TwoParam,
     sigmoid: NodeId,
@@ -146,6 +150,18 @@ pub fn convMany(self: *TracingExecutor, cl_alloc: *cl.Alloc, in: Tensor, kernel:
             .conv = .{
                 .a = in.buf,
                 .b = kernel.buf,
+            },
+        },
+    );
+}
+
+pub fn maxpool(self: *TracingExecutor, cl_alloc: *cl.Alloc, in: Tensor, stride: u32) !Tensor {
+    return try self.appendNode(
+        try self.inner.maxpool(cl_alloc, self.getClTensor(in.buf), stride),
+        .{
+            .maxpool = .{
+                .in = in.buf,
+                .stride = stride,
             },
         },
     );
@@ -302,6 +318,15 @@ fn backpropInner(self: TracingExecutor, cl_alloc: *cl.Alloc, id: NodeId, downstr
         .gt => {
             // This is either infinite(? Maybe at the limit it's 1 or something for some reason) or 0
             // Assume 0 for now and do nothing
+        },
+        .maxpool => |params| {
+            const inputs = self.getClTensor(params.in);
+            const grads = try self.inner.maxpoolGrad(cl_alloc, downstream_gradients, inputs, params.stride);
+
+            // FIXME: This only has to happen if it's a gradient we care about
+            try self.inner.addAssign(cl_alloc, gradient_tree.get(params.in), grads);
+
+            try self.backpropInner(cl_alloc, params.in, grads, gradient_tree);
         },
         .reshape => |source_id| {
             // Here we just need to take our gradient_tree and transform them to match our parent

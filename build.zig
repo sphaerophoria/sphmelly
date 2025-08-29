@@ -22,6 +22,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe.root_module.addImport("sphtud", sphtud.module("sphtud"));
+    exe.root_module.addCSourceFile(.{
+        .file = b.path("src/stb_image.c"),
+    });
+    exe.root_module.addIncludePath(b.path("src"));
     exe.linkSystemLibrary("OpenCL");
     exe.linkLibC();
 
@@ -32,6 +36,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     imagegen.root_module.addImport("sphtud", sphtud.module("sphtud"));
+    imagegen.root_module.addCSourceFile(.{
+        .file = b.path("src/stb_image.c"),
+    });
+    imagegen.root_module.addIncludePath(b.path("src"));
     imagegen.linkSystemLibrary("OpenCL");
     imagegen.linkLibC();
 
@@ -47,6 +55,12 @@ pub fn build(b: *std.Build) void {
         .root_source_file = conv_test_data,
     });
     test_exe.root_module.addImport("sphtud", sphtud.module("sphtud"));
+    // FIXME: I don't think barcodegen should be importing stb_image in the
+    // tests... I don't think we ever instantiate it
+    test_exe.root_module.addIncludePath(b.path("src"));
+    test_exe.root_module.addCSourceFile(.{
+        .file = b.path("src/stb_image.c"),
+    });
     test_exe.linkSystemLibrary("OpenCL");
     test_exe.linkLibC();
 

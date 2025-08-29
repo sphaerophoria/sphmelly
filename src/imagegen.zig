@@ -52,6 +52,7 @@ const ImageUpdater = struct {
     scratch: std.mem.Allocator,
     math_executor: math.Executor,
     image_view: *tsv.ImageView(GuiAction),
+    mask_view: *tsv.ImageView(GuiAction),
     orientation_view: *tsv.OrientationRenderer(GuiAction),
 
     seed: u64,
@@ -103,20 +104,25 @@ const ImageUpdater = struct {
             .ctr = 0,
             .seed = @intCast(self.seed % (1 << 32)),
         };
+
+        const img_size = 256;
+
         const bars = try self.barcode_gen.makeBars(
             self.cl_alloc,
             self.param_gen,
-            &.{ 64, 64, num_images },
+            &.{ img_size, img_size, num_images },
             &rand_source,
         );
 
         try self.math_executor.executor.finish();
 
         const cpu_image = try self.tensorToRgbaCpu(bars.imgs);
+        const mask_image_cpu = try self.tensorToRgbaCpu(bars.masks);
         const cpu_orientation = try self.extractOrientation(bars.orientations);
 
         gl.glLineWidth(5.0);
         try self.image_view.setImg(cpu_image);
+        try self.mask_view.setImg(mask_image_cpu);
         self.orientation_view.setOrientation(cpu_orientation);
     }
 };
@@ -137,7 +143,7 @@ pub fn main() !void {
 
     const math_executor = try math.Executor.init(&cl_alloc, &cl_executor);
 
-    var barcode_gen = try BarcodeGen.init(&cl_alloc, math_executor);
+    var barcode_gen = try BarcodeGen.init(allocators.scratch.linear(), &cl_alloc, math_executor, "backgrounds2");
 
     gl.glEnable(gl.GL_SCISSOR_TEST);
     gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA);
@@ -145,6 +151,7 @@ pub fn main() !void {
 
     const gui_alloc = try allocators.root_render.makeSubAlloc("gui");
     const image_view_alloc = try gui_alloc.gl.makeSubAlloc(gui_alloc.heap);
+    const mask_view_alloc = try gui_alloc.gl.makeSubAlloc(gui_alloc.heap);
 
     const gui_state = try gui.widget_factory.widgetState(
         GuiAction,
@@ -162,6 +169,13 @@ pub fn main() !void {
         .onReqStat = &GuiAction.generateRequestImageStat,
     };
 
+    var mask_view = tsv.ImageView(GuiAction){
+        .alloc = mask_view_alloc,
+        .image = undefined,
+        .image_renderer = &gui_state.image_renderer,
+        .onReqStat = null,
+    };
+
     var orientation_view = try tsv.orientationRenderer(GuiAction, gui_alloc, &solid_color_renderer, .{ .r = 1, .g = 0, .b = 0, .a = 1 });
 
     var image_view_updater = ImageUpdater{
@@ -170,13 +184,14 @@ pub fn main() !void {
         .scratch = allocators.scratch.allocator(),
         .math_executor = math_executor,
         .image_view = &image_view,
+        .mask_view = &mask_view,
         .orientation_view = orientation_view,
         .param_gen = .{
             // FIXME offset range should probably be a ratio of image size, not absolute pixels
             .x_offs_range = .{ -50, 50 },
             .y_offs_range = .{ -50, 50 },
-            .x_scale_range = .{ 2.0, 3.0 },
-            .aspect_range = .{ 1.0, 2.0 },
+            .x_scale_range = .{ 0.2, 0.4 },
+            .aspect_range = .{ 0.4, 1.0 },
             .min_contrast = 0.2,
             .x_noise_multiplier_range = .{ 5.0, 10.1 },
             .y_noise_multiplier_range = .{ 5.0, 10.1 },
@@ -203,8 +218,21 @@ pub fn main() !void {
     try layout.pushWidget(try widget_factory.makeLabel("selected"));
     try layout.pushWidget(try widget_factory.makeDrag(usize, &image_view_updater.selected_image, &GuiAction.generateSelectedImage, 1, 5));
 
+    // FIXME: WTF layout
+    try layout.pushWidget(
+        try widget_factory.makeBox(
+            mask_view.asWidget(),
+            .{ .width = 500, .height = 200 },
+            .fill_none,
+        ),
+    );
+
     const image_view_stack = try widget_factory.makeStack(2);
-    try image_view_stack.pushWidget(image_view.asWidget(), .{});
+    try image_view_stack.pushWidget(try widget_factory.makeBox(
+        image_view.asWidget(),
+        .{ .width = 500, .height = 200 },
+        .fill_none,
+    ), .{});
     try image_view_stack.pushWidget(orientation_view.asWidget(), .{ .vertical_justify = .center, .horizontal_justify = .center });
     try layout.pushWidget(image_view_stack.asWidget());
 

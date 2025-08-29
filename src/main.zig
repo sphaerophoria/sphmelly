@@ -39,6 +39,10 @@ fn OpenClLayerGen(comptime Executor: type) type {
             return conv_layer.layer();
         }
 
+        fn maxpoolLayer(self: Self, stride: u32) !nn.Layer(Executor) {
+            return nn.maxpoolLayer(Executor, self.cl_alloc.heap(), stride);
+        }
+
         fn reshape(_: Self, alloc: std.mem.Allocator, dims: []const u32) !nn.Layer(Executor) {
             const layer = try alloc.create(nn.Reshape(Executor));
             layer.* = try nn.Reshape(Executor).init(dims);
@@ -479,11 +483,14 @@ const TrainNotifier = struct {
     }
 };
 
-const train_num_images = 200;
-const default_lr = 0.05;
+const train_num_images = 300;
+const default_lr = 0.004;
 
 fn trainThread(channels: *SharedChannels) !void {
-    const cl_alloc_buf = try std.heap.page_allocator.alloc(u8, 1 * 1024 * 1024);
+    var scratch_alloc = sphtud.alloc.BufAllocator.init(try std.heap.page_allocator.alloc(u8, 1 * 1024 * 1024));
+    defer std.heap.page_allocator.free(scratch_alloc.buf);
+
+    const cl_alloc_buf = try std.heap.page_allocator.alloc(u8, 50 * 1024 * 1024);
     defer std.heap.page_allocator.free(cl_alloc_buf);
 
     var cl_alloc: cl.Alloc = undefined;
@@ -510,7 +517,7 @@ fn trainThread(channels: *SharedChannels) !void {
         .seed = 1,
     };
 
-    const barcode_size = 64;
+    const barcode_size = 256;
 
     const he_initializer = nn.HeInitializer(math.TracingExecutor){
         .executor = &tracing_executor,
@@ -524,23 +531,32 @@ fn trainThread(channels: *SharedChannels) !void {
     const layers: []const nn.Layer(math.TracingExecutor) = &.{
         try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 1, 4),
         layer_gen.relu(),
-        try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 4, 2),
+        try layer_gen.maxpoolLayer(2),
+
+        try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 4, 8),
         layer_gen.relu(),
-        try layer_gen.reshape(cl_alloc.heap(), &.{ barcode_size * barcode_size * 2, train_num_images }),
-        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, barcode_size * barcode_size * 2, 16),
+        try layer_gen.maxpoolLayer(4),
+
+        try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 8, 16),
         layer_gen.relu(),
-        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 16, 16),
+        try layer_gen.maxpoolLayer(2),
+
+        try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 16, 32),
         layer_gen.relu(),
-        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 16, 2),
+
+        try layer_gen.reshape(cl_alloc.heap(), &.{ 16 * 16 * 32, train_num_images }),
+        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 16 * 16 * 32, 16 * 16),
+        layer_gen.sigmoid(),
+        try layer_gen.reshape(cl_alloc.heap(), &.{ 16, 16, 1, train_num_images }),
     };
 
-    var barcode_gen = try BarcodeGen.init(&cl_alloc, math_executor);
+    var barcode_gen = try BarcodeGen.init(scratch_alloc.linear(), &cl_alloc, math_executor, "backgrounds2");
     const rand_params = BarcodeGen.RandomizationParams{
         // FIXME offset range should probably be a ratio of image size, not absolute pixels
         .x_offs_range = .{ -50, 50 },
         .y_offs_range = .{ -50, 50 },
-        .x_scale_range = .{ 2.0, 3.0 },
-        .aspect_range = .{ 1.0, 2.0 },
+        .x_scale_range = .{ 0.2, 0.4 },
+        .aspect_range = .{ 0.4, 1.0 },
         .min_contrast = 0.2,
         .x_noise_multiplier_range = .{ 5.0, 10.1 },
         .y_noise_multiplier_range = .{ 5.0, 10.1 },
@@ -548,7 +564,7 @@ fn trainThread(channels: *SharedChannels) !void {
         .background_color_range = .{ 0.0, 1.0 },
         // FIXME Blur amount is in pixel space, maybe these should be
         // scaled by resolution of inputs
-        .blur_stddev_range = .{ 0.0001, 3.0 },
+        .blur_stddev_range = .{ 0.0001, 2.0 },
     };
 
     var trainer = nn.Trainer(TrainNotifier){
@@ -586,9 +602,12 @@ fn trainThread(channels: *SharedChannels) !void {
                 const bars = try barcode_gen.makeBars(&cl_alloc, rand_params, &.{ barcode_size, barcode_size, train_num_images }, &rand_source);
                 try notifier.batchGenerationQueued(bars.imgs, bars.orientations);
 
+                const masks_reshaped = try math_executor.reshape(&cl_alloc, bars.masks, &.{ barcode_size, barcode_size, 1, train_num_images });
+                const expected = try math_executor.maxpool(&cl_alloc, masks_reshaped, 16);
+
                 const batch_cl_4d = try math_executor.reshape(&cl_alloc, bars.imgs, &.{ barcode_size, barcode_size, 1, train_num_images });
 
-                try trainer.step(batch_cl_4d, bars.orientations);
+                try trainer.step(batch_cl_4d, expected);
 
                 try cl_executor.finish();
 
@@ -656,7 +675,7 @@ const TrainingReqDoubleBuffer = struct {
 
 pub fn main() !void {
     var allocators: AppAllocators = undefined;
-    try allocators.initPinned(20 * 1024 * 1024);
+    try allocators.initPinned(100 * 1024 * 1024);
 
     var ui: train_ui.Gui = undefined;
     try ui.initPinned(&allocators, default_lr, train_num_images);
@@ -671,7 +690,7 @@ pub fn main() !void {
 
     var req_alloc_buf = try TrainingReqDoubleBuffer.init(
         allocators.scratch.allocator(),
-        5 * 1024 * 1024,
+        20 * 1024 * 1024,
     );
 
     var outstanding_req: usize = 0;

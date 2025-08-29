@@ -1,12 +1,17 @@
+const sphtud = @import("sphtud");
 const std = @import("std");
 const cl = @import("cl.zig");
 const math = @import("math.zig");
+const stbi = @cImport({
+    @cInclude("stb_image.h");
+});
 
 math_executor: math.Executor,
 module_gen_kernel: cl.Executor.Kernel,
 barcode_gen_kernel: cl.Executor.Kernel,
 sample_params_kernel: cl.Executor.Kernel,
 generate_blur_kernels_kernel: cl.Executor.Kernel,
+backgrounds: math.Executor.Tensor,
 
 const barcode_gen_program_source = math.Executor.rand_program_content ++ @embedFile("BarcodeGen/generate.cl");
 
@@ -25,18 +30,74 @@ pub const RandomizationParams = struct {
     blur_stddev_range: [2]f32,
 };
 
-pub fn init(cl_alloc: *cl.Alloc, math_executor: math.Executor) !BarcodeGen {
+pub fn init(scratch: sphtud.alloc.LinearAllocator, cl_alloc: *cl.Alloc, math_executor: math.Executor, background_image_dir: []const u8) !BarcodeGen {
     const program = try math_executor.executor.createProgram(cl_alloc, barcode_gen_program_source);
     const barcode_gen_kernel = try program.createKernel(cl_alloc, "generate_barcode");
     const module_gen_kernel = try program.createKernel(cl_alloc, "generate_module_patterns");
     const sample_params_kernel = try program.createKernel(cl_alloc, "sample_barcode_params");
     const generate_blur_kernels_kernel = try program.createKernel(cl_alloc, "generate_blur_kernels");
+
+    var dir = try std.fs.cwd().openDir(background_image_dir, .{ .iterate = true });
+    defer dir.close();
+
+    const cp = scratch.checkpoint();
+    defer scratch.restore(cp);
+
+    var it = dir.iterate();
+
+    var image_paths = try sphtud.util.RuntimeSegmentedList([:0]const u8).init(
+        scratch.allocator(),
+        scratch.allocator(),
+        100,
+        10000,
+    );
+
+    while (try it.next()) |entry| {
+        const cwd_rel_path = try std.fmt.allocPrintZ(scratch.allocator(), "{s}/{s}", .{ background_image_dir, entry.name });
+        try image_paths.append(cwd_rel_path);
+    }
+
+    // FIXME: what if images in dir aren't 256x256 lol
+    const backgrounds = try math_executor.createTensorFilled(
+        cl_alloc,
+        &.{ 256, 256, @as(u32, @intCast(image_paths.len)) },
+        std.math.nan(f32),
+    );
+
+    var path_it = image_paths.iter();
+    const cpu_f32: []f32 = try scratch.allocator().alloc(f32, 256 * 256);
+
+    const cl_alloc_cp = cl_alloc.checkpoint();
+    defer cl_alloc.reset(cl_alloc_cp);
+
+    var img_offset: usize = 0;
+    while (path_it.next()) |path| {
+        defer img_offset += 256 * 256 * @sizeOf(f32);
+
+        var w: i32 = 0;
+        var h: i32 = 0;
+        const data_ptr = stbi.stbi_load(path.*, &w, &h, null, 1);
+        if (data_ptr == null) return error.OpenImage;
+
+        defer stbi.stbi_image_free(data_ptr);
+
+        if (w != 256 or h != 256) return error.ImageDims;
+
+        for (data_ptr[0 .. 256 * 256], 0..) |v, i| {
+            cpu_f32[i] = @as(f32, @floatFromInt(v)) / 255.0;
+        }
+
+        const res = try math_executor.executor.writeBuffer(cl_alloc, backgrounds.buf, img_offset, std.mem.sliceAsBytes(cpu_f32));
+        try res.wait();
+    }
+
     return .{
         .math_executor = math_executor,
         .barcode_gen_kernel = barcode_gen_kernel,
         .module_gen_kernel = module_gen_kernel,
         .sample_params_kernel = sample_params_kernel,
         .generate_blur_kernels_kernel = generate_blur_kernels_kernel,
+        .backgrounds = backgrounds,
     };
 }
 
@@ -154,6 +215,8 @@ fn instanceRandParams(
         .{ .float = rand_params.background_color_range[0] },
         // max_background_color,
         .{ .float = rand_params.background_color_range[1] },
+        // num_images
+        .{ .uint = self.backgrounds.dims.get(2) },
         // seed,
         .{ .uint = rand_source.seed },
         // ctr_start
@@ -181,6 +244,7 @@ fn runFirstPass(self: BarcodeGen, cl_alloc: *cl.Alloc, params_buf: math.Executor
         .{ .buf = params_buf.buf },
         .{ .buf = imgs.buf },
         .{ .buf = masks.buf },
+        .{ .buf = self.backgrounds.buf },
         .{ .uint = dims.get(0) },
         .{ .uint = dims.get(1) },
         .{ .uint = dims.get(2) },
