@@ -321,10 +321,12 @@ pub fn ImageView(comptime Action: type) type {
                 return response;
             }
 
+            const image_height_i: i32 = @intCast(self.image.height);
+
             if (self.onReqStat) |f| {
                 response.action = f(.{
                     .x = @intCast(pixel_x),
-                    .y = @intCast(pixel_y),
+                    .y = @intCast(image_height_i - pixel_y - 1),
                 });
             }
 
