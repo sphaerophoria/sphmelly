@@ -741,52 +741,75 @@ pub fn convManyGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_gradients: T
 }
 
 const ClExecutorFixture = struct {
-    buf: []u8,
-    cl_alloc: cl.Alloc,
-    executor: cl.Executor,
-    cl_math: Executor,
+    cl_alloc: *cl.Alloc,
+    alloc_checkpoint: cl.Alloc.Checkpoint,
+    executor: *cl.Executor,
+    cl_math: *Executor,
     rand_source: math.RandSource,
 
-    fn initPinned(self: *ClExecutorFixture) !void {
-        self.buf = try std.heap.page_allocator.alloc(u8, 10 * 1024 * 1024);
+    const Global = struct {
+        buf: []u8,
+        cl_alloc: cl.Alloc,
+        executor: cl.Executor,
+        cl_math: Executor,
+    };
 
-        self.executor = try cl.Executor.init();
-        errdefer self.executor.deinit();
+    var global: ?Global = null;
 
-        try self.cl_alloc.initPinned(self.buf);
-        errdefer self.cl_alloc.deinit();
+    fn init() !ClExecutorFixture {
+        const g = try initGlobal();
 
-        self.cl_math = try Executor.init(&self.cl_alloc, self.executor);
-
-        self.rand_source = .{
-            .ctr = 0,
-            .seed = 0,
+        return .{
+            .cl_alloc = &g.cl_alloc,
+            .alloc_checkpoint = g.cl_alloc.checkpoint(),
+            .executor = &g.executor,
+            .cl_math = &g.cl_math,
+            .rand_source = .{
+                .ctr = 0,
+                .seed = 0,
+            },
         };
     }
 
     fn deinit(self: *ClExecutorFixture) void {
-        self.cl_alloc.deinit();
-        self.executor.deinit();
-        std.heap.page_allocator.free(self.buf);
+        self.cl_alloc.reset(self.alloc_checkpoint);
+    }
+
+    fn initGlobal() !*Global {
+        if (global) |*g| return g;
+
+        global = undefined;
+        const g = &global.?;
+
+        g.buf = try std.heap.page_allocator.alloc(u8, 10 * 1024 * 1024);
+        errdefer std.heap.page_allocator.free(g.buf);
+
+        g.executor = try cl.Executor.init();
+        errdefer g.executor.deinit();
+
+        try g.cl_alloc.initPinned(g.buf);
+        errdefer g.cl_alloc.deinit();
+
+        g.cl_math = try Executor.init(&g.cl_alloc, g.executor);
+        return g;
     }
 };
 
 test "addAssign" {
-    var fixture: ClExecutorFixture = undefined;
-    try fixture.initPinned();
+    var fixture = try ClExecutorFixture.init();
     defer fixture.deinit();
 
-    const a = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, &.{
+    const a = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, &.{
         1, 2, 3, 4,
     }, &.{4});
 
-    const b = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, &.{
+    const b = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, &.{
         5, 6, 7, 8,
     }, &.{4});
 
     try fixture.cl_math.addAssign(a, b);
 
-    const actual = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, a);
+    const actual = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, a);
     const expected: []const f32 = &.{ 6, 8, 10, 12 };
 
     for (expected, actual) |ex, ac| {
@@ -795,17 +818,16 @@ test "addAssign" {
 }
 
 test "mulScalar" {
-    var fixture: ClExecutorFixture = undefined;
-    try fixture.initPinned();
+    var fixture = try ClExecutorFixture.init();
     defer fixture.deinit();
 
-    const a = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, &.{
+    const a = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, &.{
         1, 2,
         3, 4,
     }, &.{ 2, 2 });
 
-    const res = try fixture.cl_math.mulScalar(&fixture.cl_alloc, a, 4);
-    const res_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, res);
+    const res = try fixture.cl_math.mulScalar(fixture.cl_alloc, a, 4);
+    const res_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, res);
 
     const expected: []const f32 = &.{ 4, 8, 12, 16 };
 
@@ -815,16 +837,15 @@ test "mulScalar" {
 }
 
 test "matmul" {
-    var fixture: ClExecutorFixture = undefined;
-    try fixture.initPinned();
+    var fixture = try ClExecutorFixture.init();
     defer fixture.deinit();
 
-    const a = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, &.{
+    const a = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, &.{
         1, 2, 3,
         4, 5, 6,
     }, &.{ 3, 2 });
 
-    const b = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, &.{
+    const b = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, &.{
         7,  8,  9,  10,
         11, 12, 13, 14,
         15, 16, 17, 18,
@@ -834,7 +855,7 @@ test "matmul" {
         27, 28, 29, 30,
     }, &.{ 4, 3, 2 });
 
-    const c = try fixture.cl_math.matmul(&fixture.cl_alloc, a, b);
+    const c = try fixture.cl_math.matmul(fixture.cl_alloc, a, b);
 
     try std.testing.expectEqual(4, c.dims.get(0));
     try std.testing.expectEqual(2, c.dims.get(1));
@@ -849,7 +870,7 @@ test "matmul" {
     };
 
     var actual: [16]f32 = undefined;
-    const finish = try fixture.executor.readBuffer(&fixture.cl_alloc, c.buf, 0, std.mem.sliceAsBytes(&actual));
+    const finish = try fixture.executor.readBuffer(fixture.cl_alloc, c.buf, 0, std.mem.sliceAsBytes(&actual));
     try finish.wait();
 
     for (expected, actual) |ex, ac| {
@@ -858,12 +879,11 @@ test "matmul" {
 }
 
 test "matmulGrad" {
-    var fixture: ClExecutorFixture = undefined;
-    try fixture.initPinned();
+    var fixture = try ClExecutorFixture.init();
     defer fixture.deinit();
 
     const grads = try fixture.cl_math.createTensorUntracked(
-        &fixture.cl_alloc,
+        fixture.cl_alloc,
         &.{
             1,  2,  3,
             4,  5,  6,
@@ -877,7 +897,7 @@ test "matmulGrad" {
     );
 
     const a = try fixture.cl_math.createTensorUntracked(
-        &fixture.cl_alloc,
+        fixture.cl_alloc,
         &.{
             10, 11,
             12, 13,
@@ -887,7 +907,7 @@ test "matmulGrad" {
     );
 
     const b = try fixture.cl_math.createTensorUntracked(
-        &fixture.cl_alloc,
+        fixture.cl_alloc,
         &.{
             16, 17, 18,
             19, 20, 21,
@@ -898,7 +918,7 @@ test "matmulGrad" {
         &.{ 3, 2, 2 },
     );
 
-    const a_grads, const b_grads = try fixture.cl_math.matmulGrad(&fixture.cl_alloc, grads, a, b);
+    const a_grads, const b_grads = try fixture.cl_math.matmulGrad(fixture.cl_alloc, grads, a, b);
 
     const a_expected: []const f32 = &.{
         1 * 16 + 2 * 17 + 3 * 18 + 22 * 31 + 23 * 32 + 24 * 33,
@@ -929,13 +949,13 @@ test "matmulGrad" {
         24 * 11 + 27 * 13 + 30 * 15,
     };
 
-    const a_actual = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, a_grads);
+    const a_actual = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, a_grads);
 
     for (a_expected, a_actual) |ex, ac| {
         try std.testing.expectApproxEqAbs(ex, ac, 0.001);
     }
 
-    const b_actual = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, b_grads);
+    const b_actual = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, b_grads);
 
     for (b_expected, b_actual) |ex, ac| {
         try std.testing.expectApproxEqAbs(ex, ac, 0.001);
@@ -943,8 +963,7 @@ test "matmulGrad" {
 }
 
 test "sigmoid" {
-    var fixture: ClExecutorFixture = undefined;
-    try fixture.initPinned();
+    var fixture = try ClExecutorFixture.init();
     defer fixture.deinit();
 
     const input: []const f32 = &.{
@@ -955,11 +974,11 @@ test "sigmoid" {
         10.0,
     };
 
-    const in_gpu = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, input, &.{input.len});
-    const out_gpu = try fixture.cl_math.sigmoid(&fixture.cl_alloc, in_gpu);
+    const in_gpu = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, input, &.{input.len});
+    const out_gpu = try fixture.cl_math.sigmoid(fixture.cl_alloc, in_gpu);
 
     var actual: [5]f32 = undefined;
-    const final = try fixture.executor.readBuffer(&fixture.cl_alloc, out_gpu.buf, 0, std.mem.sliceAsBytes(&actual));
+    const final = try fixture.executor.readBuffer(fixture.cl_alloc, out_gpu.buf, 0, std.mem.sliceAsBytes(&actual));
     try final.wait();
 
     const expected: []const f32 = &.{ 4.53978687e-05, 6.69285092e-03, 5.00000000e-01, 9.93307149e-01, 9.99954602e-01 };
@@ -970,12 +989,11 @@ test "sigmoid" {
 }
 
 test "sigmoidGrad" {
-    var fixture: ClExecutorFixture = undefined;
-    try fixture.initPinned();
+    var fixture = try ClExecutorFixture.init();
     defer fixture.deinit();
 
     const downstream_grads = try fixture.cl_math.createTensorUntracked(
-        &fixture.cl_alloc,
+        fixture.cl_alloc,
         &.{
             1, 2, 3, 4, 5,
         },
@@ -983,18 +1001,18 @@ test "sigmoidGrad" {
     );
 
     const inputs = try fixture.cl_math.createTensorUntracked(
-        &fixture.cl_alloc,
+        fixture.cl_alloc,
         &.{ -10, -5, 0, 5, 10 },
         &.{5},
     );
 
     const gradients = try fixture.cl_math.sigmoidGrad(
-        &fixture.cl_alloc,
+        fixture.cl_alloc,
         downstream_grads,
         inputs,
     );
 
-    const actual = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, gradients);
+    const actual = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, gradients);
     const expected: []const f32 = &.{
         0.0000453958 * 1,
         0.00664806 * 2,
@@ -1009,21 +1027,20 @@ test "sigmoidGrad" {
 }
 
 test "relu" {
-    var fixture: ClExecutorFixture = undefined;
-    try fixture.initPinned();
+    var fixture = try ClExecutorFixture.init();
     defer fixture.deinit();
 
     const in_cpu = &.{
         -2,  0.1, -0.1,
         0.5, 3,   0.0,
     };
-    const in_gpu = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, in_cpu, &.{ 3, 2 });
+    const in_gpu = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, in_cpu, &.{ 3, 2 });
 
-    const out_gpu = try fixture.cl_math.relu(&fixture.cl_alloc, in_gpu);
+    const out_gpu = try fixture.cl_math.relu(fixture.cl_alloc, in_gpu);
 
     try std.testing.expect(in_gpu.dims.eql(out_gpu.dims));
 
-    const out_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, out_gpu);
+    const out_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, out_gpu);
 
     const expected: []const f32 = &.{
         0,   0.1, 0,
@@ -1036,8 +1053,7 @@ test "relu" {
 }
 
 test "reluGrad" {
-    var fixture: ClExecutorFixture = undefined;
-    try fixture.initPinned();
+    var fixture = try ClExecutorFixture.init();
     defer fixture.deinit();
 
     const in_cpu = &.{
@@ -1050,14 +1066,14 @@ test "reluGrad" {
         4, 5, 6,
     };
 
-    const in_gpu = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, in_cpu, &.{ 3, 2 });
-    const downstream_grads_gpu = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, downstream_grads_cpu, &.{ 3, 2 });
+    const in_gpu = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, in_cpu, &.{ 3, 2 });
+    const downstream_grads_gpu = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, downstream_grads_cpu, &.{ 3, 2 });
 
-    const out_gpu = try fixture.cl_math.reluGrad(&fixture.cl_alloc, downstream_grads_gpu, in_gpu);
+    const out_gpu = try fixture.cl_math.reluGrad(fixture.cl_alloc, downstream_grads_gpu, in_gpu);
 
     try std.testing.expect(in_gpu.dims.eql(out_gpu.dims));
 
-    const out_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, out_gpu);
+    const out_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, out_gpu);
 
     const expected: []const f32 = &.{
         0, 2, 0,
@@ -1070,12 +1086,11 @@ test "reluGrad" {
 }
 
 test "addSplatOuter" {
-    var fixture: ClExecutorFixture = undefined;
-    try fixture.initPinned();
+    var fixture = try ClExecutorFixture.init();
     defer fixture.deinit();
 
-    const a = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, &.{ 1, 2, 3, 4 }, &.{4});
-    const b = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, &.{
+    const a = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, &.{ 1, 2, 3, 4 }, &.{4});
+    const b = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, &.{
         5,  6,  7,  8,
         9,  10, 11, 12,
         13, 14, 15, 16,
@@ -1089,9 +1104,9 @@ test "addSplatOuter" {
         18, 20, 22, 24,
     };
 
-    const actual_gpu = try fixture.cl_math.addSplatOuter(&fixture.cl_alloc, a, b);
+    const actual_gpu = try fixture.cl_math.addSplatOuter(fixture.cl_alloc, a, b);
     var actual: [16]f32 = undefined;
-    const final = try fixture.executor.readBuffer(&fixture.cl_alloc, actual_gpu.buf, 0, std.mem.sliceAsBytes(&actual));
+    const final = try fixture.executor.readBuffer(fixture.cl_alloc, actual_gpu.buf, 0, std.mem.sliceAsBytes(&actual));
     try final.wait();
 
     for (expected, actual) |ex, ac| {
@@ -1100,19 +1115,18 @@ test "addSplatOuter" {
 }
 
 test "addSplatOuterGrad" {
-    var fixture: ClExecutorFixture = undefined;
-    try fixture.initPinned();
+    var fixture = try ClExecutorFixture.init();
     defer fixture.deinit();
 
-    const a = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, &.{ 1, 2, 3, 4 }, &.{4});
-    const b = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, &.{
+    const a = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, &.{ 1, 2, 3, 4 }, &.{4});
+    const b = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, &.{
         5,  6,  7,  8,
         9,  10, 11, 12,
         13, 14, 15, 16,
         17, 18, 19, 20,
     }, &.{ 4, 4 });
 
-    const downstream_gradients = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, &.{
+    const downstream_gradients = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, &.{
         21, 22, 23, 24,
         25, 26, 27, 28,
         29, 30, 31, 32,
@@ -1133,10 +1147,10 @@ test "addSplatOuterGrad" {
         33, 34, 35, 36,
     };
 
-    const a_grad, const b_grad = try fixture.cl_math.addSplatOuterGrad(&fixture.cl_alloc, downstream_gradients, a, b);
+    const a_grad, const b_grad = try fixture.cl_math.addSplatOuterGrad(fixture.cl_alloc, downstream_gradients, a, b);
 
-    const a_grad_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, a_grad);
-    const b_grad_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, b_grad);
+    const a_grad_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, a_grad);
+    const b_grad_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, b_grad);
 
     for (expected_a, a_grad_cpu) |ex, ac| {
         try std.testing.expectApproxEqAbs(ex, ac, 0.0001);
@@ -1148,12 +1162,11 @@ test "addSplatOuterGrad" {
 }
 
 test "gt" {
-    var fixture: ClExecutorFixture = undefined;
-    try fixture.initPinned();
+    var fixture = try ClExecutorFixture.init();
     defer fixture.deinit();
 
     const vals = try fixture.cl_math.createTensorUntracked(
-        &fixture.cl_alloc,
+        fixture.cl_alloc,
         &.{
             // Slice 1
             1, 2, 3,
@@ -1168,7 +1181,7 @@ test "gt" {
         &.{ 3, 3, 2 },
     );
 
-    const res = try fixture.cl_math.gt(&fixture.cl_alloc, vals, 2);
+    const res = try fixture.cl_math.gt(fixture.cl_alloc, vals, 2);
     try std.testing.expectEqualSlices(u32, &.{ 3, 3 }, res.dims.inner);
 
     const expected: []const f32 = &.{
@@ -1177,7 +1190,7 @@ test "gt" {
         1.0, 1.0, 1.0,
     };
 
-    const output = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, res);
+    const output = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, res);
 
     for (expected, output) |ec, o| {
         try std.testing.expectApproxEqAbs(ec, o, 0.001);
@@ -1185,30 +1198,29 @@ test "gt" {
 }
 
 test "squaredErr" {
-    var fixture: ClExecutorFixture = undefined;
-    try fixture.initPinned();
+    var fixture = try ClExecutorFixture.init();
     defer fixture.deinit();
 
     const a = try fixture.cl_math.createTensorUntracked(
-        &fixture.cl_alloc,
+        fixture.cl_alloc,
         &.{ 1.0, 2.0, 2.0 },
         &.{3},
     );
 
     const b = try fixture.cl_math.createTensorUntracked(
-        &fixture.cl_alloc,
+        fixture.cl_alloc,
         &.{ 3.0, 2.0, 1.0 },
         &.{3},
     );
 
-    const res = try fixture.cl_math.squaredErr(&fixture.cl_alloc, a, b);
+    const res = try fixture.cl_math.squaredErr(fixture.cl_alloc, a, b);
     try std.testing.expectEqualSlices(u32, &.{3}, res.dims.inner);
 
     const expected: []const f32 = &.{
         4.0, 0.0, 1.0,
     };
 
-    const output = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, res);
+    const output = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, res);
 
     for (expected, output) |ec, o| {
         try std.testing.expectApproxEqAbs(ec, o, 0.001);
@@ -1216,28 +1228,27 @@ test "squaredErr" {
 }
 
 test "squaredErrGrad" {
-    var fixture: ClExecutorFixture = undefined;
-    try fixture.initPinned();
+    var fixture = try ClExecutorFixture.init();
     defer fixture.deinit();
 
     const a = try fixture.cl_math.createTensorUntracked(
-        &fixture.cl_alloc,
+        fixture.cl_alloc,
         &.{ 1.0, 2.0, 2.0 },
         &.{3},
     );
 
     const b = try fixture.cl_math.createTensorUntracked(
-        &fixture.cl_alloc,
+        fixture.cl_alloc,
         &.{ 3.0, 2.0, 1.0 },
         &.{3},
     );
 
-    const downstream_gradients = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, &.{ 4, 5, 6 }, &.{3});
+    const downstream_gradients = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, &.{ 4, 5, 6 }, &.{3});
 
-    const a_grad, const b_grad = try fixture.cl_math.squaredErrGrad(&fixture.cl_alloc, downstream_gradients, a, b);
+    const a_grad, const b_grad = try fixture.cl_math.squaredErrGrad(fixture.cl_alloc, downstream_gradients, a, b);
 
-    const a_grad_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, a_grad);
-    const b_grad_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, b_grad);
+    const a_grad_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, a_grad);
+    const b_grad_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, b_grad);
 
     const expected_a: []const f32 = &.{
         -16, 0, 12,
@@ -1293,13 +1304,12 @@ fn calcChiSquared(actual_buckets: []const usize, expected_buckets: []const usize
 const chi2_threshold = 1110.0;
 
 test "rand" {
-    var fixture: ClExecutorFixture = undefined;
-    try fixture.initPinned();
+    var fixture = try ClExecutorFixture.init();
     defer fixture.deinit();
 
     const num_nums = 1000000;
-    const numbers_gpu = try fixture.cl_math.rand(&fixture.cl_alloc, &.{num_nums}, &fixture.rand_source);
-    const numbers_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, numbers_gpu);
+    const numbers_gpu = try fixture.cl_math.rand(fixture.cl_alloc, &.{num_nums}, &fixture.rand_source);
+    const numbers_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, numbers_gpu);
 
     const num_buckets = 1000;
     const expected: [num_buckets]usize = @splat(num_nums / num_buckets);
@@ -1319,13 +1329,12 @@ pub fn normalDistAt(x: f32) f32 {
 }
 
 test "gaussian" {
-    var fixture: ClExecutorFixture = undefined;
-    try fixture.initPinned();
+    var fixture = try ClExecutorFixture.init();
     defer fixture.deinit();
 
     const num_nums = 1000000;
-    const numbers_gpu = try fixture.cl_math.randGaussian(&fixture.cl_alloc, &.{num_nums}, 1.0, &fixture.rand_source);
-    const numbers_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, numbers_gpu);
+    const numbers_gpu = try fixture.cl_math.randGaussian(fixture.cl_alloc, &.{num_nums}, 1.0, &fixture.rand_source);
+    const numbers_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, numbers_gpu);
 
     const num_buckets = 1000;
     var expected: [num_buckets]usize = undefined;
@@ -1354,8 +1363,7 @@ test "gaussian" {
 }
 
 test "convMany" {
-    var fixture: ClExecutorFixture = undefined;
-    try fixture.initPinned();
+    var fixture = try ClExecutorFixture.init();
     defer fixture.deinit();
 
     // (5, 5, 2, 1)
@@ -1413,13 +1421,13 @@ test "convMany" {
         0,  0,  0,  0, 0,
     };
 
-    const img_gpu = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, in_img, &.{ 5, 5, 2, 1 });
-    const kernel_gpu = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, in_kernel, &.{ 3, 3, 2, 2 });
+    const img_gpu = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, in_img, &.{ 5, 5, 2, 1 });
+    const kernel_gpu = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, in_kernel, &.{ 3, 3, 2, 2 });
 
-    const ret = try fixture.cl_math.convMany(&fixture.cl_alloc, img_gpu, kernel_gpu);
+    const ret = try fixture.cl_math.convMany(fixture.cl_alloc, img_gpu, kernel_gpu);
     try std.testing.expectEqualSlices(u32, ret.dims.inner, &.{ 5, 5, 2, 1 });
 
-    const ret_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, ret);
+    const ret_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, ret);
 
     for (ret_cpu, expected_output) |ac, ex| {
         try std.testing.expectApproxEqAbs(ex, ac, 0.0001);
@@ -1430,7 +1438,7 @@ const JsonTensor = struct {
     shape: []const u32,
     data: []const f32,
 
-    fn toTensor(self: JsonTensor, alloc: *cl.Alloc, executor: Executor) !Tensor {
+    fn toTensor(self: JsonTensor, alloc: *cl.Alloc, executor: *Executor) !Tensor {
         return try executor.createTensorUntracked(alloc, self.data, self.shape);
     }
 };
@@ -1446,29 +1454,28 @@ const ConvDefinition = struct {
 };
 
 test "convMany2" {
-    var fixture: ClExecutorFixture = undefined;
-    try fixture.initPinned();
+    var fixture = try ClExecutorFixture.init();
     defer fixture.deinit();
 
     const test_data = try std.json.parseFromSliceLeaky([]ConvDefinition, fixture.cl_alloc.heap(), @embedFile("conv_test_data"), .{ .ignore_unknown_fields = true });
 
     for (test_data) |test_elem| {
-        const img = try test_elem.img.toTensor(&fixture.cl_alloc, fixture.cl_math);
-        const kernel = try test_elem.kernel.toTensor(&fixture.cl_alloc, fixture.cl_math);
+        const img = try test_elem.img.toTensor(fixture.cl_alloc, fixture.cl_math);
+        const kernel = try test_elem.kernel.toTensor(fixture.cl_alloc, fixture.cl_math);
 
-        const output = try fixture.cl_math.convMany(&fixture.cl_alloc, img, kernel);
+        const output = try fixture.cl_math.convMany(fixture.cl_alloc, img, kernel);
         try std.testing.expect(output.dims.eql(try .init(fixture.cl_alloc.heap(), test_elem.output.shape)));
 
-        const downstream_grad = try test_elem.downstream_grad.toTensor(&fixture.cl_alloc, fixture.cl_math);
+        const downstream_grad = try test_elem.downstream_grad.toTensor(fixture.cl_alloc, fixture.cl_math);
 
-        const img_grads, const kernel_grads = try fixture.cl_math.convManyGrad(&fixture.cl_alloc, downstream_grad, img, kernel);
+        const img_grads, const kernel_grads = try fixture.cl_math.convManyGrad(fixture.cl_alloc, downstream_grad, img, kernel);
 
         try std.testing.expect(img_grads.dims.eql(try .init(fixture.cl_alloc.heap(), test_elem.img_grad.shape)));
         try std.testing.expect(kernel_grads.dims.eql(try .init(fixture.cl_alloc.heap(), test_elem.kernel_grad.shape)));
 
-        const output_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, output);
-        const kg_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, kernel_grads);
-        const ig_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, img_grads);
+        const output_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, output);
+        const kg_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, kernel_grads);
+        const ig_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, img_grads);
 
         for (output_cpu, test_elem.output.data) |ac, ex| {
             try std.testing.expectApproxEqAbs(ex, ac, 0.01);
@@ -1485,8 +1492,7 @@ test "convMany2" {
 }
 
 test "transpose" {
-    var fixture: ClExecutorFixture = undefined;
-    try fixture.initPinned();
+    var fixture = try ClExecutorFixture.init();
     defer fixture.deinit();
 
     const in_cpu = &.{
@@ -1494,8 +1500,8 @@ test "transpose" {
         4, 5, 6,
     };
 
-    const in_gpu = try fixture.cl_math.createTensorUntracked(&fixture.cl_alloc, in_cpu, &.{ 3, 2 });
-    const out_gpu = try fixture.cl_math.transpose(&fixture.cl_alloc, in_gpu);
+    const in_gpu = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, in_cpu, &.{ 3, 2 });
+    const out_gpu = try fixture.cl_math.transpose(fixture.cl_alloc, in_gpu);
     try std.testing.expectEqual(out_gpu.dims.get(0), 2);
     try std.testing.expectEqual(out_gpu.dims.get(1), 3);
 
@@ -1505,7 +1511,7 @@ test "transpose" {
         3, 6,
     };
 
-    const out_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), &fixture.cl_alloc, out_gpu);
+    const out_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, out_gpu);
 
     for (expected, out_cpu) |ex, ac| {
         try std.testing.expectApproxEqAbs(ex, ac, 0.0001);
