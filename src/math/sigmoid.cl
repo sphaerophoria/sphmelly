@@ -18,6 +18,11 @@ __kernel void sigmoid_grad(
     if (global_id >= n) return;
 
     float enx = exp(-in[global_id]);
+    if (enx == INFINITY) {
+        output[global_id] = 0;
+        return;
+    }
+
     float enxp1 = enx + 1;
     float grad = enx / enxp1 / enxp1 * downstream_grad[global_id];
     output[global_id] = grad;
