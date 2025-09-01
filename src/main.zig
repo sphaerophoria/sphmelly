@@ -591,12 +591,11 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8) !void {
     };
 
     var trainer = nn.Trainer(TrainNotifier){
-        .optimizer = .{
+        .optimizer = try .init(.{
             .lr = default_lr,
-            .executor = math_executor,
-            .traced = &tracing_executor,
-            .weights = try .init(cl_alloc.heap(), 100),
-        },
+            .executor = &tracing_executor,
+            .cl_alloc = &cl_alloc,
+        }),
         .cl_alloc = &cl_alloc,
         .layers = layers,
         .tracing_executor = &tracing_executor,

@@ -64,6 +64,10 @@ pub fn restore(self: *TracingExecutor, restore_point: usize) void {
     self.graph.resize(restore_point) catch unreachable;
 }
 
+pub fn clExecutor(self: *TracingExecutor) *cl.Executor {
+    return self.inner.executor;
+}
+
 pub fn createTensor(self: *TracingExecutor, cl_alloc: *cl.Alloc, initial_data: []const f32, dims_in: []const u32) !TensorRes {
     const res = try self.inner.createTensor(cl_alloc, initial_data, dims_in);
     const tensor = try self.appendNode(res.val, .init);

@@ -317,23 +317,65 @@ pub fn Reshape(comptime Executor: type) type {
 }
 
 pub const Optimizer = struct {
-    weights: sphtud.util.RuntimeBoundedArray(math.TracingExecutor.Tensor),
-    traced: *math.TracingExecutor,
-    executor: math.Executor,
+    cl_alloc: *cl.Alloc,
+    weights: sphtud.util.RuntimeBoundedArray(Item),
+    executor: *math.TracingExecutor,
+    adam_kernel: cl.Executor.Kernel,
+    t: u32,
     lr: f32,
 
-    pub fn registerWeights(self: *Optimizer, weights: math.TracingExecutor.Tensor) !void {
-        try self.weights.append(weights);
+    const adam_program_content = @embedFile("adam.cl");
+
+    const Item = struct {
+        weights: math.TracingExecutor.Tensor,
+        // m,v,m,v,m,v
+        adam_params: math.Executor.Tensor,
+    };
+
+    pub const InitParams = struct {
+        cl_alloc: *cl.Alloc,
+        executor: *math.TracingExecutor,
+        lr: f32,
+    };
+
+    pub fn init(params: InitParams) !Optimizer {
+        const program = try params.executor.clExecutor().createProgram(params.cl_alloc, adam_program_content);
+        const adam_kernel = try program.createKernel(params.cl_alloc, "adam");
+        const weights = try sphtud.util.RuntimeBoundedArray(Item).init(params.cl_alloc.heap(), 100);
+        return .{
+            .cl_alloc = params.cl_alloc,
+            .weights = weights,
+            .executor = params.executor,
+            .lr = params.lr,
+            .adam_kernel = adam_kernel,
+            .t = 0,
+        };
     }
 
-    pub fn optimize(self: Optimizer, cl_alloc: *cl.Alloc, gradients: math.TracingExecutor.Gradients, batch_size: usize) !void {
-        const grad_mul = -self.lr / @as(f32, @floatFromInt(batch_size));
+    pub fn registerWeights(self: *Optimizer, weights: math.TracingExecutor.Tensor) !void {
+        try self.weights.append(.{
+            .weights = weights,
+            .adam_params = try self.executor.inner.createTensorFilled(self.cl_alloc, &.{2 * weights.dims.numElems()}, 0),
+        });
+    }
+
+    pub fn optimize(self: *Optimizer, cl_alloc: *cl.Alloc, gradients: math.TracingExecutor.Gradients) !void {
+        self.t +|= 1;
 
         for (self.weights.items) |item| {
-            const item_grad = gradients.get(item.buf);
-            const tensor = self.traced.getClTensor(item.buf);
-            const weighted_grad = try self.executor.mulScalar(cl_alloc, item_grad, grad_mul);
-            try self.executor.addAssign(cl_alloc, tensor, weighted_grad);
+            const item_grad = gradients.get(item.weights.buf);
+            const tensor = self.executor.getClTensor(item.weights.buf);
+
+            const n = tensor.dims.numElems();
+
+            try self.executor.clExecutor().executeKernelUntracked(cl_alloc, self.adam_kernel, n, &.{
+                .{ .buf = tensor.buf },
+                .{ .buf = item.adam_params.buf },
+                .{ .buf = item_grad.buf },
+                .{ .float = self.lr },
+                .{ .uint = self.t },
+                .{ .uint = n },
+            });
         }
     }
 };
@@ -378,7 +420,7 @@ pub fn Trainer(comptime Notifier: type) type {
                 return .nan;
             }
 
-            try self.optimizer.optimize(self.cl_alloc, gradients, batch.dims.get(batch.dims.len() - 1));
+            try self.optimizer.optimize(self.cl_alloc, gradients);
 
             return .ok;
         }
