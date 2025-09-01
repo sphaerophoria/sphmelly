@@ -33,6 +33,7 @@ const Operation = union(enum) {
     matmul: TwoParam,
     add_splat_outer: TwoParam,
     conv: TwoParam,
+    bce_with_logits: TwoParam,
     transpose: NodeId,
 };
 
@@ -183,6 +184,17 @@ pub fn squaredErr(self: *TracingExecutor, cl_alloc: *cl.Alloc, a: Tensor, b: Ten
     );
 }
 
+pub fn bceWithLogits(self: *TracingExecutor, cl_alloc: *cl.Alloc, input: Tensor, expected: Tensor) !Tensor {
+    return try self.appendNode(
+        try self.inner.bceWithLogits(cl_alloc, self.getClTensor(input.buf), self.getClTensor(expected.buf)),
+        .{
+            .bce_with_logits = .{
+                .a = input.buf,
+                .b = expected.buf,
+            },
+        },
+    );
+}
 pub fn addSplatOuter(self: *TracingExecutor, cl_alloc: *cl.Alloc, a: Tensor, b: Tensor) !Tensor {
     const a_inner = self.getClTensor(a.buf);
     const b_inner = self.getClTensor(b.buf);
@@ -390,6 +402,17 @@ fn backpropInner(self: TracingExecutor, cl_alloc: *cl.Alloc, id: NodeId, downstr
         .transpose => |source_id| {
             const grads = try self.inner.transpose(cl_alloc, downstream_gradients);
             try self.backpropInner(cl_alloc, source_id, grads, gradient_tree);
+        },
+        .bce_with_logits => |params| {
+            const a = self.getClTensor(params.a);
+            const b = self.getClTensor(params.b);
+
+            const a_grads = try self.inner.bceWithLogitsGrad(cl_alloc, downstream_gradients, a, b);
+
+            // FIXME: This only has to happen if it's a gradient we care about
+            try self.inner.addAssign(cl_alloc, gradient_tree.get(params.a), a_grads);
+
+            try self.backpropInner(cl_alloc, params.a, a_grads, gradient_tree);
         },
     }
 }

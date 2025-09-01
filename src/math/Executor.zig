@@ -18,6 +18,7 @@ pub const rand_program_content = @embedFile("rand.cl");
 pub const conv_program_content = @embedFile("conv.cl");
 pub const maxpool_program_content = @embedFile("max_pool.cl");
 pub const has_nan_program_content = @embedFile("has_nan.cl");
+pub const bce_program_content = @embedFile("bce.cl");
 
 matmul_kernel: cl.Executor.Kernel,
 matmul_grad_a_kernel: cl.Executor.Kernel,
@@ -31,6 +32,8 @@ add_splat_grad_a_kernel: cl.Executor.Kernel,
 gt_kernel: cl.Executor.Kernel,
 squared_err_kernel: cl.Executor.Kernel,
 squared_err_grad_kernel: cl.Executor.Kernel,
+bce_with_logits_kernel: cl.Executor.Kernel,
+bce_with_logits_grad_kernel: cl.Executor.Kernel,
 add_assign_kernel: cl.Executor.Kernel,
 mul_scalar_kernel: cl.Executor.Kernel,
 rand_kernel: cl.Executor.Kernel,
@@ -80,6 +83,10 @@ pub fn init(cl_alloc: *cl.Alloc, executor: *cl.Executor) !Executor {
     const squared_err_kernel = try squared_err_program.createKernel(cl_alloc, "squared_err");
     const squared_err_grad_kernel = try squared_err_program.createKernel(cl_alloc, "squared_err_grad");
 
+    const bce_program = try executor.createProgram(cl_alloc, bce_program_content);
+    const bce_with_logits_kernel = try bce_program.createKernel(cl_alloc, "bce_with_logits");
+    const bce_with_logits_grad_kernel = try bce_program.createKernel(cl_alloc, "bce_with_logits_grad");
+
     const rand_program = try executor.createProgram(cl_alloc, rand_program_content);
     const rand_kernel = try rand_program.createKernel(cl_alloc, "rand");
     const gaussian_kernel = try rand_program.createKernel(cl_alloc, "gaussian");
@@ -113,6 +120,8 @@ pub fn init(cl_alloc: *cl.Alloc, executor: *cl.Executor) !Executor {
         .gt_kernel = gt_kernel,
         .squared_err_kernel = squared_err_kernel,
         .squared_err_grad_kernel = squared_err_grad_kernel,
+        .bce_with_logits_kernel = bce_with_logits_kernel,
+        .bce_with_logits_grad_kernel = bce_with_logits_grad_kernel,
         .add_assign_kernel = add_assign_kernel,
         .mul_scalar_kernel = mul_scalar_kernel,
         .rand_kernel = rand_kernel,
@@ -317,6 +326,47 @@ pub fn squaredErrGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_grad: Tens
     return .{
         a_grad, b_grad,
     };
+}
+
+pub fn bceWithLogits(self: *Executor, cl_alloc: *cl.Alloc, input: Tensor, expected: Tensor) !Tensor {
+    if (!input.dims.eql(expected.dims)) {
+        std.log.err("{any} does not match {any}\n", .{ input.dims, expected.dims });
+        return error.InvalidDims;
+    }
+
+    const ret = try self.executor.createBuffer(cl_alloc, .read_write, input.dims.byteSize());
+
+    const n = input.dims.numElems();
+    try self.executor.executeKernelUntracked(cl_alloc, self.bce_with_logits_kernel, n, &.{
+        .{ .buf = input.buf },
+        .{ .buf = expected.buf },
+        .{ .buf = ret },
+        .{ .uint = n },
+    });
+
+    return .{
+        .buf = ret,
+        .dims = try input.dims.clone(cl_alloc.heap()),
+    };
+}
+
+pub fn bceWithLogitsGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_grad: Tensor, input: Tensor, expected: Tensor) !Tensor {
+    if (!input.dims.eql(expected.dims) or !input.dims.eql(downstream_grad.dims)) {
+        return error.InvalidDims;
+    }
+
+    const grad = try self.createTensorUninitialized(cl_alloc, input.dims);
+
+    const n = input.dims.numElems();
+    try self.executor.executeKernelUntracked(cl_alloc, self.bce_with_logits_grad_kernel, n, &.{
+        .{ .buf = downstream_grad.buf },
+        .{ .buf = input.buf },
+        .{ .buf = expected.buf },
+        .{ .buf = grad.buf },
+        .{ .uint = n },
+    });
+
+    return grad;
 }
 
 pub fn maskedConv(self: Executor, cl_alloc: *cl.Alloc, img: Tensor, mask: Tensor, img_kernels: Tensor) !Tensor {
@@ -1414,6 +1464,41 @@ test "squaredErr" {
 
     for (expected, output) |ec, o| {
         try std.testing.expectApproxEqAbs(ec, o, 0.001);
+    }
+}
+
+const BceTestDefinition = struct {
+    input: JsonTensor,
+    target: JsonTensor,
+    downstream_grad: JsonTensor,
+    input_grad: JsonTensor,
+    output: JsonTensor,
+};
+
+test "bceWithLogits" {
+    var fixture = try ClExecutorFixture.init();
+    defer fixture.deinit();
+
+    const test_data = try std.json.parseFromSliceLeaky(BceTestDefinition, fixture.cl_alloc.heap(), @embedFile("bce_test_data"), .{});
+
+    const input = try test_data.input.toTensor(fixture.cl_alloc, fixture.cl_math);
+    const target = try test_data.target.toTensor(fixture.cl_alloc, fixture.cl_math);
+    const downstream_grad = try test_data.downstream_grad.toTensor(fixture.cl_alloc, fixture.cl_math);
+
+    const output = try fixture.cl_math.bceWithLogits(fixture.cl_alloc, input, target);
+    const output_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, output);
+
+    try std.testing.expect(output.dims.eql(try .init(fixture.cl_alloc.heap(), test_data.output.shape)));
+    for (test_data.output.data, output_cpu) |ex, ac| {
+        try std.testing.expectApproxEqAbs(ex, ac, 0.0001);
+    }
+
+    const calculated_grads = try fixture.cl_math.bceWithLogitsGrad(fixture.cl_alloc, downstream_grad, input, target);
+    const calculated_grads_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, calculated_grads);
+
+    try std.testing.expect(output.dims.eql(try .init(fixture.cl_alloc.heap(), test_data.input_grad.shape)));
+    for (test_data.input_grad.data, calculated_grads_cpu) |ex, ac| {
+        try std.testing.expectApproxEqAbs(ex, ac, 0.0001);
     }
 }
 

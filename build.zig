@@ -7,6 +7,13 @@ fn generateConvTestData(b: *std.Build) std.Build.LazyPath {
     return cmd.captureStdOut();
 }
 
+fn generateBceTestData(b: *std.Build) std.Build.LazyPath {
+    const cmd = b.addSystemCommand(&.{"python3"});
+    cmd.addFileArg(b.path("src/math/Executor/generate_bce_logits_test.py"));
+
+    return cmd.captureStdOut();
+}
+
 fn addCommonDependencies(b: *std.Build, exe: *std.Build.Step.Compile, sphtud_mod: *std.Build.Module) void {
     exe.root_module.addImport("sphtud", sphtud_mod);
     exe.root_module.addCSourceFile(.{
@@ -44,6 +51,7 @@ pub fn build(b: *std.Build) void {
     addCommonDependencies(b, imagegen, sphtud_mod);
 
     const conv_test_data = generateConvTestData(b);
+    const bce_test_data = generateBceTestData(b);
 
     const test_exe = b.addTest(.{
         .name = "test",
@@ -54,6 +62,9 @@ pub fn build(b: *std.Build) void {
     addCommonDependencies(b, test_exe, sphtud_mod);
     test_exe.root_module.addAnonymousImport("conv_test_data", .{
         .root_source_file = conv_test_data,
+    });
+    test_exe.root_module.addAnonymousImport("bce_test_data", .{
+        .root_source_file = bce_test_data,
     });
 
     b.installArtifact(test_exe);

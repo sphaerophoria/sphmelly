@@ -580,8 +580,8 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8) !void {
 
         try layer_gen.reshape(cl_alloc.heap(), &.{ 16 * 16 * 32, train_num_images }),
         try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 16 * 16 * 32, 16 * 16),
-        layer_gen.sigmoid(),
         try layer_gen.reshape(cl_alloc.heap(), &.{ 16, 16, 1, train_num_images }),
+        layer_gen.sigmoid(),
     };
 
     var barcode_gen = try BarcodeGen.init(
@@ -655,8 +655,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8) !void {
                 try notifier.predictionsQueued(results[results.len - 1]);
 
                 const traced_expected = try tracing_executor.appendNode(train_input.expected, .init);
-                const loss = try tracing_executor.squaredErr(&cl_alloc, results[results.len - 1], traced_expected);
-
+                const loss = try tracing_executor.bceWithLogits(&cl_alloc, results[results.len - 2], traced_expected);
                 try notifier.notifyLoss(loss);
 
                 switch (try trainer.step(loss)) {
