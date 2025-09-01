@@ -261,7 +261,7 @@ const ImgValueRetriever = struct {
 
         const idx = pos.y * self.current_pixel_data.width + pos.x;
         if (idx < self.current_pixel_data.data.len) {
-            return std.fmt.bufPrint(&self.buf, "selected value: {d:.5}", .{self.current_pixel_data.data[idx]}) catch &self.buf;
+            return std.fmt.bufPrint(&self.buf, "selected value ({d},{d}): {d:.5}", .{ pos.x, pos.y, self.current_pixel_data.data[idx] }) catch &self.buf;
         } else {
             return none_string;
         }
