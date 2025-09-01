@@ -380,6 +380,18 @@ pub const Optimizer = struct {
     }
 };
 
+pub fn runLayers(alloc: *cl.Alloc, batch: math.Executor.Tensor, layers: []const Layer(math.TracingExecutor), tracing_executor: *math.TracingExecutor) ![]math.TracingExecutor.Tensor {
+    var ret = try alloc.heap().alloc(math.TracingExecutor.Tensor, layers.len);
+    const traced_batch = try tracing_executor.appendNode(batch, .init);
+    var results = traced_batch;
+    for (layers, 0..) |layer, i| {
+        results = try layer.execute(alloc, tracing_executor, results);
+        ret[i] = results;
+    }
+
+    return ret;
+}
+
 pub fn Trainer(comptime Notifier: type) type {
     return struct {
         optimizer: Optimizer,
@@ -395,24 +407,7 @@ pub fn Trainer(comptime Notifier: type) type {
             nan,
         };
 
-        pub fn step(self: *Self, batch: math.Executor.Tensor, correct: math.Executor.Tensor) !StepResult {
-            var results = try self.tracing_executor.appendNode(batch, .init);
-
-            const layer_outputs = try self.cl_alloc.heap().alloc(math.TracingExecutor.Tensor, self.layers.len);
-
-            for (self.layers, 0..) |layer, layer_id| {
-                results = try layer.execute(self.cl_alloc, self.tracing_executor, results);
-                layer_outputs[layer_id] = results;
-            }
-            try self.notifier.notifyLayerOutputs(layer_outputs);
-
-            try self.notifier.predictionsQueued(results);
-
-            const traced_correct = try self.tracing_executor.appendNode(correct, .init);
-
-            const loss = try self.tracing_executor.squaredErr(self.cl_alloc, traced_correct, results);
-            try self.notifier.notifyLoss(loss);
-
+        pub fn step(self: *Self, loss: math.TracingExecutor.Tensor) !StepResult {
             const gradients = try self.tracing_executor.backprop(self.cl_alloc, loss.buf);
             try self.notifier.notifyGradients(self.layers, gradients);
 

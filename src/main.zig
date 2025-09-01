@@ -502,6 +502,28 @@ const TrainNotifier = struct {
 
 const train_num_images = 300;
 const default_lr = 0.004;
+const barcode_size = 256;
+
+const TrainingInput = struct {
+    input: math.Executor.Tensor,
+    expected: math.Executor.Tensor,
+};
+
+fn generateTrainingInput(cl_alloc: *cl.Alloc, barcode_gen: *BarcodeGen, rand_params: BarcodeGen.RandomizationParams, math_executor: math.Executor, rand_source: *math.RandSource, notifier: *TrainNotifier) !TrainingInput {
+    const bars = try barcode_gen.makeBars(cl_alloc, rand_params, train_num_images, rand_source);
+
+    const masks_reshaped = try math_executor.reshape(cl_alloc, bars.masks, &.{ barcode_size, barcode_size, 1, train_num_images });
+    const expected = try math_executor.maxpool(cl_alloc, masks_reshaped, 16);
+
+    try notifier.batchGenerationQueued(bars.imgs, bars.orientations, expected);
+
+    const batch_cl_4d = try math_executor.reshape(cl_alloc, bars.imgs, &.{ barcode_size, barcode_size, 1, train_num_images });
+
+    return .{
+        .input = batch_cl_4d,
+        .expected = expected,
+    };
+}
 
 fn trainThread(channels: *SharedChannels, background_dir: []const u8) !void {
     const cl_alloc_buf = try std.heap.page_allocator.alloc(u8, 1 * 1024 * 1024);
@@ -530,8 +552,6 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8) !void {
         .ctr = 0,
         .seed = 1,
     };
-
-    const barcode_size = 256;
 
     const he_initializer = nn.HeInitializer(math.TracingExecutor){
         .executor = &tracing_executor,
@@ -621,15 +641,25 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8) !void {
                 tracing_executor.restore(math_checkpoint);
                 cl_alloc.reset(cl_alloc_checkpoint);
 
-                const bars = try barcode_gen.makeBars(&cl_alloc, rand_params, train_num_images, &rand_source);
+                const train_input = try generateTrainingInput(
+                    &cl_alloc,
+                    &barcode_gen,
+                    rand_params,
+                    math_executor,
+                    &rand_source,
+                    &notifier,
+                );
 
-                const masks_reshaped = try math_executor.reshape(&cl_alloc, bars.masks, &.{ barcode_size, barcode_size, 1, train_num_images });
-                const expected = try math_executor.maxpool(&cl_alloc, masks_reshaped, 16);
-                try notifier.batchGenerationQueued(bars.imgs, bars.orientations, expected);
+                const results = try nn.runLayers(&cl_alloc, train_input.input, layers, &tracing_executor);
+                try notifier.notifyLayerOutputs(results);
+                try notifier.predictionsQueued(results[results.len - 1]);
 
-                const batch_cl_4d = try math_executor.reshape(&cl_alloc, bars.imgs, &.{ barcode_size, barcode_size, 1, train_num_images });
+                const traced_expected = try tracing_executor.appendNode(train_input.expected, .init);
+                const loss = try tracing_executor.squaredErr(&cl_alloc, results[results.len - 1], traced_expected);
 
-                switch (try trainer.step(batch_cl_4d, expected)) {
+                try notifier.notifyLoss(loss);
+
+                switch (try trainer.step(loss)) {
                     .nan => {
                         pause = .{ .paused = cl_alloc.checkpoint() };
                         continue;
