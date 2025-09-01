@@ -366,14 +366,19 @@ pub fn gradTensorToRgbaCpu(alloc: std.mem.Allocator, data: []const f32, dims: []
 
     for (0..data.len) |i| {
         const abs: u8 = @intFromFloat(@max(0, @min(@abs(255 * data[i] * mul), 255)));
-        if (data[i] < 0) {
+        if (std.math.isNan(data[i])) {
             img_cpu_rgba[i * 4 + 0] = 0;
+            img_cpu_rgba[i * 4 + 1] = 255;
+            img_cpu_rgba[i * 4 + 2] = 0;
+        } else if (data[i] < 0) {
+            img_cpu_rgba[i * 4 + 0] = 0;
+            img_cpu_rgba[i * 4 + 1] = 0;
             img_cpu_rgba[i * 4 + 2] = abs;
         } else {
             img_cpu_rgba[i * 4 + 0] = abs;
+            img_cpu_rgba[i * 4 + 1] = 0;
             img_cpu_rgba[i * 4 + 2] = 0;
         }
-        img_cpu_rgba[i * 4 + 1] = 0;
         img_cpu_rgba[i * 4 + 3] = 255;
     }
 

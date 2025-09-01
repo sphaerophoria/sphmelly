@@ -309,7 +309,12 @@ pub fn Trainer(comptime Notifier: type) type {
 
         const Self = @This();
 
-        pub fn step(self: *Self, batch: math.Executor.Tensor, correct: math.Executor.Tensor) !void {
+        pub const StepResult = enum {
+            ok,
+            nan,
+        };
+
+        pub fn step(self: *Self, batch: math.Executor.Tensor, correct: math.Executor.Tensor) !StepResult {
             var results = try self.tracing_executor.appendNode(batch, .init);
 
             const layer_outputs = try self.cl_alloc.heap().alloc(math.TracingExecutor.Tensor, self.layers.len);
@@ -330,7 +335,21 @@ pub fn Trainer(comptime Notifier: type) type {
             const gradients = try self.tracing_executor.backprop(self.cl_alloc, loss.buf);
             try self.notifier.notifyGradients(self.layers, gradients);
 
+            if (try self.gradientsHaveNan(gradients)) {
+                return .nan;
+            }
+
             try self.optimizer.optimize(self.cl_alloc, gradients, batch.dims.get(batch.dims.len() - 1));
+
+            return .ok;
+        }
+
+        fn gradientsHaveNan(self: *Self, gradients: math.TracingExecutor.Gradients) !bool {
+            for (gradients.graph) |gradient| {
+                if (try self.tracing_executor.inner.hasNan(self.cl_alloc, gradient)) return true;
+            }
+
+            return false;
         }
     };
 }

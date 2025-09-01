@@ -135,3 +135,13 @@ pub const RandSource = struct {
     seed: u32,
     ctr: u64,
 };
+
+pub fn roundUp(comptime T: type, num: T, multiple: T) T {
+    return num + ((multiple - (num % multiple)) % multiple);
+}
+
+test "roundUp" {
+    try std.testing.expectEqual(roundUp(u32, 4, 4), 4);
+    try std.testing.expectEqual(roundUp(u32, 7, 4), 8);
+    try std.testing.expectEqual(roundUp(u32, 8, 4), 8);
+}

@@ -1,5 +1,6 @@
 const std = @import("std");
 const sphtud = @import("sphtud");
+const math = @import("math.zig");
 
 const cl = @cImport({
     @cInclude("CL/cl.h");
@@ -344,7 +345,7 @@ pub const Executor = struct {
 
         try clError(ret);
 
-        clError(cl.clBuildProgram(program, 0, null, null, null, null)) catch |e| {
+        clError(cl.clBuildProgram(program, 0, null, "-cl-std=CL2.0", null, null)) catch |e| {
             var log: [4096]u8 = undefined;
             var log_len: usize = 0;
             _ = cl.clGetProgramBuildInfo(program, self.device, cl.CL_PROGRAM_BUILD_LOG, log.len, &log, &log_len);
@@ -525,7 +526,7 @@ pub const Executor = struct {
     fn prepareKernel(self: Executor, kernel: Kernel, num_elems: usize, args: []const Kernel.Arg) !KernelParams {
         const local_size = try self.getKernelLocalSize(kernel);
 
-        const global_size = roundUp(usize, num_elems, local_size);
+        const global_size = math.roundUp(usize, num_elems, local_size);
 
         for (args, 0..) |arg, i| {
             try kernel.setArg(@intCast(i), arg);
@@ -537,7 +538,7 @@ pub const Executor = struct {
         };
     }
 
-    fn getKernelLocalSize(self: Executor, kernel: Kernel) !usize {
+    pub fn getKernelLocalSize(self: Executor, kernel: Kernel) !usize {
         var local_size: usize = undefined;
         const ret = cl.clGetKernelWorkGroupInfo(
             kernel.kernel,
@@ -575,14 +576,4 @@ fn clError(ret: cl.cl_int) !void {
         // Oops, we got a little lazy here
         else => return error.UnknownError,
     }
-}
-
-fn roundUp(comptime T: type, num: T, multiple: T) T {
-    return num + ((multiple - (num % multiple)) % multiple);
-}
-
-test "roundUp" {
-    try std.testing.expectEqual(roundUp(u32, 4, 4), 4);
-    try std.testing.expectEqual(roundUp(u32, 7, 4), 8);
-    try std.testing.expectEqual(roundUp(u32, 8, 4), 8);
 }

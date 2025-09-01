@@ -16,6 +16,7 @@ pub const squared_err_program_content = @embedFile("squared_err.cl");
 pub const mul_program_content = @embedFile("mul.cl");
 pub const rand_program_content = @embedFile("rand.cl");
 pub const conv_program_content = @embedFile("conv.cl");
+pub const has_nan_program_content = @embedFile("has_nan.cl");
 
 matmul_kernel: cl.Executor.Kernel,
 matmul_grad_a_kernel: cl.Executor.Kernel,
@@ -40,6 +41,7 @@ conv_many_grad_kernel_pass1_kernel: cl.Executor.Kernel,
 conv_many_grad_kernel_pass2_kernel: cl.Executor.Kernel,
 conv_many_grad_img_kernel: cl.Executor.Kernel,
 conv_many_make_grad_mirrored_kernel_kernel: cl.Executor.Kernel,
+has_nan_kernel: cl.Executor.Kernel,
 transpose_kernel: cl.Executor.Kernel,
 executor: *cl.Executor,
 
@@ -87,6 +89,10 @@ pub fn init(cl_alloc: *cl.Alloc, executor: *cl.Executor) !Executor {
     const conv_many_grad_kernel_pass2_kernel = try conv_program.createKernel(cl_alloc, "conv_many_grad_kernel_pass2");
     const conv_many_grad_img_kernel = try conv_program.createKernel(cl_alloc, "conv_many_grad_img");
     const conv_many_make_grad_mirrored_kernel_kernel = try conv_program.createKernel(cl_alloc, "make_grad_mirrored_kernel");
+
+    const has_nan_program = try executor.createProgram(cl_alloc, has_nan_program_content);
+    const has_nan_kernel = try has_nan_program.createKernel(cl_alloc, "has_nan");
+
     return .{
         .matmul_kernel = matmul_kernel,
         .matmul_grad_a_kernel = matmul_grad_a_kernel,
@@ -112,6 +118,7 @@ pub fn init(cl_alloc: *cl.Alloc, executor: *cl.Executor) !Executor {
         .conv_many_grad_img_kernel = conv_many_grad_img_kernel,
         .conv_many_make_grad_mirrored_kernel_kernel = conv_many_make_grad_mirrored_kernel_kernel,
         .transpose_kernel = transpose_kernel,
+        .has_nan_kernel = has_nan_kernel,
         .executor = executor,
     };
 }
@@ -760,6 +767,90 @@ pub fn convManyGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_gradients: T
     });
 
     return .{ a_grad, b_grad };
+}
+
+const ReductionIter = struct {
+    local_size: u32,
+    in_size: u32,
+
+    input: ?cl.Executor.Buffer,
+    buffers: [2]cl.Executor.Buffer,
+    buf_idx: u1,
+
+    fn init(scratch_alloc: *cl.Alloc, input: Tensor, kernel: cl.Executor.Kernel, executor: *cl.Executor) !ReductionIter {
+        const local_size: u32 = @intCast(try executor.getKernelLocalSize(kernel));
+
+        // Over allocated by a bunch, but this is easier to calculate and will
+        // be freed quickly :)
+        //
+        // 1. first size could be / local_size
+        // 1. second size could be / local_size / local_size, but unsure how the rounding works out
+        const buf_size = input.dims.numElems() * @sizeOf(f32);
+
+        return .{
+            .local_size = local_size,
+            .in_size = input.dims.numElems(),
+            .input = input.buf,
+            .buffers = .{
+                try executor.createBuffer(scratch_alloc, .read_write, buf_size),
+                try executor.createBuffer(scratch_alloc, .read_write, buf_size),
+            },
+            .buf_idx = 1,
+        };
+    }
+
+    const Item = struct {
+        input: cl.Executor.Buffer,
+        output: cl.Executor.Buffer,
+        in_size: u32,
+    };
+
+    fn next(self: *ReductionIter) ?Item {
+        if (self.in_size <= 1) return null;
+
+        const in_buf = if (self.input) |in| in else self.buffers[self.buf_idx];
+        self.input = null;
+
+        self.buf_idx +%= 1;
+        const out_buf = self.buffers[self.buf_idx];
+
+        defer {
+            self.in_size = math.roundUp(u32, self.in_size, self.local_size) / self.local_size;
+        }
+
+        return .{
+            .input = in_buf,
+            .output = out_buf,
+            .in_size = self.in_size,
+        };
+    }
+
+    fn activeOutput(self: *ReductionIter) cl.Executor.Buffer {
+        return self.buffers[self.buf_idx];
+    }
+};
+
+pub fn hasNan(self: Executor, scratch_alloc: *cl.Alloc, in: Tensor) !bool {
+    const cp = scratch_alloc.checkpoint();
+    defer scratch_alloc.reset(cp);
+
+    var it = try ReductionIter.init(scratch_alloc, in, self.has_nan_kernel, self.executor);
+
+    while (it.next()) |item| {
+        try self.executor.executeKernelUntracked(scratch_alloc, self.has_nan_kernel, item.in_size, &.{
+            .{ .buf = item.input },
+            .{ .buf = item.output },
+            .{ .uint = item.in_size },
+        });
+    }
+
+    const read_res = try self.sliceToCpuDeferred(scratch_alloc.heap(), scratch_alloc, .{
+        .buf = it.activeOutput(),
+        .dims = math.TensorDims.initRef(&.{1}),
+        .elem_offs = 0,
+    });
+    try read_res.event.wait();
+    return std.math.isNan(read_res.val[0]);
 }
 
 const ClExecutorFixture = struct {
@@ -1537,5 +1628,33 @@ test "transpose" {
 
     for (expected, out_cpu) |ex, ac| {
         try std.testing.expectApproxEqAbs(ex, ac, 0.0001);
+    }
+}
+
+test "hasNan" {
+    var fixture = try ClExecutorFixture.init();
+    defer fixture.deinit();
+
+    const local_size = try fixture.executor.getKernelLocalSize(fixture.cl_math.has_nan_kernel);
+    const buf_size: u32 = @intCast(local_size * local_size + 1);
+    const in_cpu = try fixture.cl_alloc.heap().alloc(f32, buf_size);
+    @memset(in_cpu, 0);
+
+    const test_positions: []const usize = &.{ 0, local_size, local_size + 1, local_size * local_size, local_size * local_size };
+
+    const cp = fixture.cl_alloc.checkpoint();
+
+    {
+        const in_gpu = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, in_cpu, &.{buf_size});
+        try std.testing.expect(!try fixture.cl_math.hasNan(fixture.cl_alloc, in_gpu));
+    }
+
+    for (test_positions) |position| {
+        fixture.cl_alloc.reset(cp);
+
+        @memset(in_cpu, 0);
+        in_cpu[position] = std.math.nan(f32);
+        const in_gpu = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, in_cpu, &.{buf_size});
+        try std.testing.expect(try fixture.cl_math.hasNan(fixture.cl_alloc, in_gpu));
     }
 }

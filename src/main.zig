@@ -588,7 +588,13 @@ fn trainThread(channels: *SharedChannels) !void {
 
                 const batch_cl_4d = try math_executor.reshape(&cl_alloc, bars.imgs, &.{ barcode_size, barcode_size, 1, train_num_images });
 
-                try trainer.step(batch_cl_4d, bars.orientations);
+                switch (try trainer.step(batch_cl_4d, bars.orientations)) {
+                    .nan => {
+                        pause = .{ .paused = cl_alloc.checkpoint() };
+                        continue;
+                    },
+                    .ok => {},
+                }
 
                 try cl_executor.finish();
             },
