@@ -23,7 +23,7 @@ pub const Gui = struct {
         gl.glEnable(gl.GL_SCISSOR_TEST);
         gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA);
         gl.glEnable(gl.GL_BLEND);
-        gl.glLineWidth(5.0);
+        gl.glLineWidth(2.0);
 
         const gui_alloc = try allocators.root_render.makeSubAlloc("gui");
         self.widgets = try makeGuiWidgets(gui_alloc, &allocators.scratch, &allocators.scratch_gl, &self.params);
@@ -63,6 +63,20 @@ pub const Gui = struct {
 
         const overlay_tex = try sphtud.render.makeTextureFromRgba(scratch_gl, rgba.data, rgba.width);
         self.widgets.image_view.image_renderer.renderTexture(overlay_tex, .identity);
+    }
+
+    pub fn renderBBoxOverlay(self: *Gui, scratch_gl: *sphtud.render.GlAlloc, overlay: CpuTensor, color: sphtud.math.Vec3) !void {
+        const render_ctx = try tsv.ImageRenderContext.init(self.widgets.image_view.image);
+        defer render_ctx.reset();
+
+        const gl_cp = scratch_gl.checkpoint();
+        defer scratch_gl.restore(gl_cp);
+
+        const bbox_source = try tsv.makeBBoxGLBuffer(scratch_gl, overlay.buf, self.widgets.solid_color_renderer);
+        self.widgets.solid_color_renderer.renderLineStrip(bbox_source, .{
+            .color = color,
+            .transform = sphtud.math.Transform.identity.inner,
+        });
     }
 
     pub fn step(ui: *Gui, width: u31, height: u31) !?GuiAction {
@@ -144,6 +158,7 @@ const CpuTensor = math.Tensor([]f32);
 const Widgets = struct {
     image_view: *tsv.ImageView(GuiAction),
     runner: sphtud.ui.runner.Runner(GuiAction),
+    solid_color_renderer: *sphtud.render.xyt_program.SolidColorProgram,
 };
 
 fn makeGuiWidgets(gui_alloc: sphtud.ui.GuiAlloc, scratch: *sphtud.alloc.BufAllocator, scratch_gl: *sphtud.render.GlAlloc, gui_params: *GuiParams) !Widgets {
@@ -212,6 +227,7 @@ fn makeGuiWidgets(gui_alloc: sphtud.ui.GuiAlloc, scratch: *sphtud.alloc.BufAlloc
     return .{
         .image_view = image_view,
         .runner = try widget_factory.makeRunner(left_to_right.asWidget()),
+        .solid_color_renderer = solid_color_renderer,
     };
 }
 

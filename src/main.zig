@@ -53,8 +53,8 @@ fn OpenClLayerGen(comptime Executor: type) type {
             return nn.sigmoidLayer(Executor);
         }
 
-        fn relu(_: Self) nn.Layer(Executor) {
-            return nn.reluLayer(Executor);
+        fn relu(self: Self, leak: f32) !nn.Layer(Executor) {
+            return nn.reluLayer(Executor, self.cl_alloc.heap(), leak);
         }
     };
 }
@@ -90,7 +90,6 @@ const TrainRequest = union(enum) {
 const TrainResponse = struct {
     train_sample: ?struct {
         img: CpuTensor,
-        orientation: []f32,
         expected: CpuTensor,
         prediction: CpuTensor,
         loss: f32,
@@ -122,7 +121,6 @@ const TrainResponseBuilder = struct {
     train_sample: ?struct {
         event: cl.Executor.Event,
         data: CpuTensor,
-        orientation: []f32,
         mask: CpuTensor,
     } = null,
     prediction: ?struct {
@@ -158,7 +156,6 @@ const TrainResponseBuilder = struct {
 
             res.train_sample = .{
                 .img = s.data,
-                .orientation = s.orientation,
                 .expected = s.mask,
                 .prediction = prediction.prediction,
                 .loss = loss,
@@ -248,7 +245,6 @@ const TrainNotifier = struct {
     cache: struct {
         batch: ?math.Executor.Tensor = null,
         loss: ?math.TracingExecutor.Tensor = null,
-        orientations: ?math.Executor.Tensor = null,
         gt_mask: ?math.Executor.Tensor = null,
         predictions: ?math.TracingExecutor.Tensor = null,
         gradients: ?math.TracingExecutor.Gradients = null,
@@ -264,9 +260,8 @@ const TrainNotifier = struct {
         };
     }
 
-    fn batchGenerationQueued(self: *TrainNotifier, batch: math.Executor.Tensor, orientations: math.Executor.Tensor, mask: math.Executor.Tensor) !void {
+    fn batchGenerationQueued(self: *TrainNotifier, batch: math.Executor.Tensor, mask: math.Executor.Tensor) !void {
         self.cache.batch = batch;
-        self.cache.orientations = orientations;
         self.cache.gt_mask = mask;
 
         const req = self.current_data_request orelse return;
@@ -275,12 +270,9 @@ const TrainNotifier = struct {
         const output_alloc = (self.alloc orelse return).allocator();
 
         std.debug.assert(batch.dims.len() == 3);
-        std.debug.assert(orientations.dims.len() == 2);
 
         const batch_slice = try batch.indexOuter(train_sample);
         const batch_read_res = try self.tracing_executor.inner.sliceToCpuDeferred(output_alloc, self.cl_alloc, batch_slice);
-
-        const orientation_read_res = try self.tracing_executor.inner.sliceToCpuDeferred(output_alloc, self.cl_alloc, try orientations.indexOuter(train_sample));
 
         const mask_slice = try mask.indexOuter(train_sample);
         const mask_read_res = try self.tracing_executor.inner.sliceToCpuDeferred(output_alloc, self.cl_alloc, mask_slice);
@@ -291,7 +283,6 @@ const TrainNotifier = struct {
                 .buf = batch_read_res.val,
                 .dims = try batch_slice.dims.clone(output_alloc),
             },
-            .orientation = orientation_read_res.val,
             .mask = .{
                 .buf = mask_read_res.val,
                 .dims = try mask_slice.dims.clone(output_alloc),
@@ -442,9 +433,8 @@ const TrainNotifier = struct {
 
     fn buildFromCached(self: *TrainNotifier, layers: []const nn.Layer(math.TracingExecutor)) !void {
         if (self.cache.batch) |b| blk: {
-            const o = self.cache.orientations orelse break :blk;
             const m = self.cache.gt_mask orelse break :blk;
-            try self.batchGenerationQueued(b, o, m);
+            try self.batchGenerationQueued(b, m);
         }
 
         if (self.cache.predictions) |p| {
@@ -500,9 +490,9 @@ const TrainNotifier = struct {
     }
 };
 
-const train_num_images = 300;
+const train_num_images = 64;
 const default_lr = 0.004;
-const barcode_size = 256;
+const barcode_size = 256 * 3 / 4;
 
 const TrainingInput = struct {
     input: math.Executor.Tensor,
@@ -510,18 +500,15 @@ const TrainingInput = struct {
 };
 
 fn generateTrainingInput(cl_alloc: *cl.Alloc, barcode_gen: *BarcodeGen, rand_params: BarcodeGen.RandomizationParams, math_executor: math.Executor, rand_source: *math.RandSource, notifier: *TrainNotifier) !TrainingInput {
-    const bars = try barcode_gen.makeBars(cl_alloc, rand_params, train_num_images, rand_source);
+    const bars = try barcode_gen.makeBars(cl_alloc, rand_params, false, train_num_images, rand_source);
 
-    const masks_reshaped = try math_executor.reshape(cl_alloc, bars.masks, &.{ barcode_size, barcode_size, 1, train_num_images });
-    const expected = try math_executor.maxpool(cl_alloc, masks_reshaped, 16);
-
-    try notifier.batchGenerationQueued(bars.imgs, bars.orientations, expected);
+    try notifier.batchGenerationQueued(bars.imgs, bars.bounding_boxes);
 
     const batch_cl_4d = try math_executor.reshape(cl_alloc, bars.imgs, &.{ barcode_size, barcode_size, 1, train_num_images });
 
     return .{
         .input = batch_cl_4d,
-        .expected = expected,
+        .expected = bars.bounding_boxes,
     };
 }
 
@@ -564,24 +551,45 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8) !void {
 
     const layers: []const nn.Layer(math.TracingExecutor) = &.{
         try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 1, 4),
-        layer_gen.relu(),
+        try layer_gen.relu(0.1),
         try layer_gen.maxpoolLayer(2),
 
-        try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 4, 8),
-        layer_gen.relu(),
-        try layer_gen.maxpoolLayer(4),
-
-        try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 8, 16),
-        layer_gen.relu(),
+        try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 4, 4),
+        try layer_gen.relu(0.1),
+        try layer_gen.conv(cl_alloc.heap(), he_initializer, 1, 1, 4, 4),
+        try layer_gen.relu(0.1),
         try layer_gen.maxpoolLayer(2),
 
-        try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 16, 32),
-        layer_gen.relu(),
+        try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 4, 4),
+        try layer_gen.relu(0.1),
 
-        try layer_gen.reshape(cl_alloc.heap(), &.{ 16 * 16 * 32, train_num_images }),
-        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 16 * 16 * 32, 16 * 16),
-        try layer_gen.reshape(cl_alloc.heap(), &.{ 16, 16, 1, train_num_images }),
-        layer_gen.sigmoid(),
+        try layer_gen.conv(cl_alloc.heap(), he_initializer, 1, 1, 4, 4),
+        try layer_gen.relu(0.1),
+        try layer_gen.maxpoolLayer(2),
+
+        try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 4, 4),
+        try layer_gen.relu(0.1),
+
+        try layer_gen.conv(cl_alloc.heap(), he_initializer, 1, 1, 4, 4),
+        try layer_gen.relu(0.1),
+        try layer_gen.maxpoolLayer(2),
+
+        try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 4, 4),
+        try layer_gen.relu(0.1),
+        try layer_gen.conv(cl_alloc.heap(), he_initializer, 1, 1, 4, 4),
+        try layer_gen.relu(0.1),
+
+        try layer_gen.reshape(cl_alloc.heap(), &.{ barcode_size / 16 * barcode_size / 16 * 4, train_num_images }),
+
+        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, barcode_size / 16 * barcode_size / 16 * 4, 128),
+        try layer_gen.relu(0.1),
+
+        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 128, 128),
+        try layer_gen.relu(0.1),
+
+        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 128, 6),
+
+        try layer_gen.reshape(cl_alloc.heap(), &.{ 6, train_num_images }),
     };
 
     var barcode_gen = try BarcodeGen.init(
@@ -601,8 +609,8 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8) !void {
         .x_scale_range = .{ 0.2, 0.4 },
         .aspect_range = .{ 0.4, 1.0 },
         .min_contrast = 0.2,
-        .x_noise_multiplier_range = .{ 5.0, 10.1 },
-        .y_noise_multiplier_range = .{ 5.0, 10.1 },
+        .x_noise_multiplier_range = .{ 0, 0 },
+        .y_noise_multiplier_range = .{ 0, 0 },
         .perlin_grid_size_range = .{ 10, 100 },
         .background_color_range = .{ 0.0, 1.0 },
         // FIXME Blur amount is in pixel space, maybe these should be
@@ -655,7 +663,9 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8) !void {
                 try notifier.predictionsQueued(results[results.len - 1]);
 
                 const traced_expected = try tracing_executor.appendNode(train_input.expected, .init);
-                const loss = try tracing_executor.bceWithLogits(&cl_alloc, results[results.len - 2], traced_expected);
+                const even_loss = try tracing_executor.squaredErr(&cl_alloc, results[results.len - 1], traced_expected);
+                const loss_multipliers = try math_executor.createTensorUntracked(&cl_alloc, &.{ 1, 1, 1, 0.6, 0.05, 0.05 }, &.{6});
+                const loss = try tracing_executor.elemMul(&cl_alloc, even_loss, loss_multipliers);
                 try notifier.notifyLoss(loss);
 
                 switch (try trainer.step(loss)) {
@@ -872,8 +882,8 @@ pub fn main() !void {
 
             if (response.train_sample) |sample| {
                 try ui.setImageGrayscale(allocators.scratch.allocator(), sample.img);
-                try ui.addImgOverlayHotCold(allocators.scratch.allocator(), &allocators.scratch_gl, sample.expected, -1);
-                try ui.addImgOverlayHotCold(allocators.scratch.allocator(), &allocators.scratch_gl, sample.prediction, 1);
+                try ui.renderBBoxOverlay(&allocators.scratch_gl, sample.expected, .{ 1, 0, 0 });
+                try ui.renderBBoxOverlay(&allocators.scratch_gl, sample.prediction, .{ 0, 0, 1 });
 
                 ui.params.img_loss = sample.loss;
             } else {

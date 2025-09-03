@@ -114,6 +114,7 @@ const ImageUpdater = struct {
         const bars = try self.barcode_gen.makeBars(
             self.cl_alloc,
             self.param_gen,
+            true,
             num_images,
             &rand_source,
         );
@@ -122,9 +123,8 @@ const ImageUpdater = struct {
 
         const source_img = if (self.visualize_mask) bars.masks else bars.imgs;
         const cpu_image = try self.tensorToRgbaCpu(source_img);
-        const cpu_orientation = try self.extractOrientation(bars.orientations);
 
-        gl.glLineWidth(5.0);
+        gl.glLineWidth(2.0);
 
         try self.image_view.setImg(cpu_image);
 
@@ -134,11 +134,18 @@ const ImageUpdater = struct {
         const render_ctx = try tsv.ImageRenderContext.init(self.image_view.image);
         defer render_ctx.reset();
 
-        const render_source = try tsv.makeOrientationBuffer(self.scratch_gl, cpu_orientation, self.solid_color_renderer);
-        self.solid_color_renderer.renderLines(render_source, .{
-            .color = .{ 1.0, 0.0, 0.0 },
-            .transform = sphtud.math.Transform.identity.inner,
-        });
+        {
+            // Take bars for image we are visualizing
+            const box_slice = try bars.bounding_boxes.indexOuter(self.selected_image);
+            const res = try self.math_executor.sliceToCpuDeferred(self.scratch, self.cl_alloc, box_slice);
+            try res.event.wait();
+
+            const render_source = try tsv.makeBBoxGLBuffer(self.scratch_gl, res.val, self.solid_color_renderer);
+            self.solid_color_renderer.renderLineStrip(render_source, .{
+                .color = .{ 0.0, 0.0, 1.0 },
+                .transform = sphtud.math.Transform.identity.inner,
+            });
+        }
     }
 };
 
@@ -253,8 +260,8 @@ pub fn main() !void {
             .x_scale_range = .{ 0.2, 0.4 },
             .aspect_range = .{ 0.4, 1.0 },
             .min_contrast = 0.2,
-            .x_noise_multiplier_range = .{ 5.0, 10.1 },
-            .y_noise_multiplier_range = .{ 5.0, 10.1 },
+            .x_noise_multiplier_range = .{ 0, 0 },
+            .y_noise_multiplier_range = .{ 0, 0 },
             .perlin_grid_size_range = .{ 10, 100 },
             .background_color_range = .{ 0.0, 1.0 },
             // FIXME Blur amount is in pixel space, maybe these should be

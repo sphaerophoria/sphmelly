@@ -240,7 +240,7 @@ __kernel void sample_barcode_params(
     // size of barcode * n
     __global float* sample_buf_space,
     // Explicit separated output for training labels
-    __global float2* orientations_out,
+    __global float* bbox_out,
     uint n,
     uint img_width,
     uint img_height,
@@ -316,7 +316,13 @@ __kernel void sample_barcode_params(
         .light_color = light_color,
         .background_color = background_color,
     };
-    orientations_out[global_id] = (float2){cos(rot), sin(rot)};
+
+    bbox_out[global_id * 6 + 0] = x_offs / (float)img_width;
+    bbox_out[global_id * 6 + 1] = y_offs / (float)img_height;
+    bbox_out[global_id * 6 + 2] = sqrt(x_scale);
+    bbox_out[global_id * 6 + 3] = sqrt(y_scale);
+    bbox_out[global_id * 6 + 4] = cos(rot);
+    bbox_out[global_id * 6 + 5] = sin(rot);
 }
 
 bool multisample_barcode(
@@ -355,6 +361,7 @@ __kernel void generate_barcode(
         __global float* background_buf,
         uint width,
         uint height,
+        uint enable_backgrounds,
         uint num_barcodes
 ) {
     uint global_id = get_global_id(0);
@@ -368,7 +375,9 @@ __kernel void generate_barcode(
 
     // Just so early returns don't fall over, maybe causing extra memory io
     // which could be bad maybe i dunno whatever
-    ret[global_id] = background_buf[our_params.img_idx * width * height + pixel_id];
+    ret[global_id] = (enable_backgrounds)
+        ? background_buf[our_params.img_idx * width * height + pixel_id]
+        : our_params.background_color;
 
     float crot = cos(our_params.rot);
     float srot = sin(our_params.rot);

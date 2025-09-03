@@ -29,12 +29,16 @@ const Operation = union(enum) {
     reshape: NodeId,
     squared_err: TwoParam,
     sigmoid: NodeId,
-    relu: NodeId,
+    relu: struct {
+        in: NodeId,
+        leak: f32,
+    },
     matmul: TwoParam,
     add_splat_outer: TwoParam,
     conv: TwoParam,
     bce_with_logits: TwoParam,
     transpose: NodeId,
+    elem_mul: TwoParam,
 };
 
 const NodeId = struct { usize };
@@ -223,6 +227,21 @@ pub fn matmul(self: *TracingExecutor, cl_alloc: *cl.Alloc, a: Tensor, b: Tensor)
     );
 }
 
+// b is not a traced tensor because I didn't want to implement backprop for it :)
+pub fn elemMul(self: *TracingExecutor, cl_alloc: *cl.Alloc, a: Tensor, b: math.Executor.Tensor) !Tensor {
+    const a_inner = self.getClTensor(a.buf);
+    const b_node = try self.appendNode(b, .init);
+    return try self.appendNode(
+        try self.inner.elemMul(cl_alloc, a_inner, b),
+        .{
+            .elem_mul = .{
+                .a = a.buf,
+                .b = b_node.buf,
+            },
+        },
+    );
+}
+
 pub fn sigmoid(self: *TracingExecutor, cl_alloc: *cl.Alloc, in: Tensor) !Tensor {
     return try self.appendNode(
         try self.inner.sigmoid(cl_alloc, self.getClTensor(in.buf)),
@@ -232,11 +251,14 @@ pub fn sigmoid(self: *TracingExecutor, cl_alloc: *cl.Alloc, in: Tensor) !Tensor 
     );
 }
 
-pub fn relu(self: *TracingExecutor, cl_alloc: *cl.Alloc, in: Tensor) !Tensor {
+pub fn relu(self: *TracingExecutor, cl_alloc: *cl.Alloc, in: Tensor, leak: f32) !Tensor {
     return try self.appendNode(
-        try self.inner.relu(cl_alloc, self.getClTensor(in.buf)),
+        try self.inner.relu(cl_alloc, self.getClTensor(in.buf), leak),
         .{
-            .relu = in.buf,
+            .relu = .{
+                .in = in.buf,
+                .leak = leak,
+            },
         },
     );
 }
@@ -339,7 +361,6 @@ fn backpropInner(self: TracingExecutor, cl_alloc: *cl.Alloc, id: NodeId, downstr
             const inputs = self.getClTensor(params.in);
             const grads = try self.inner.maxpoolGrad(cl_alloc, downstream_gradients, inputs, params.stride);
 
-            // FIXME: This only has to happen if it's a gradient we care about
             try self.inner.addAssign(cl_alloc, gradient_tree.get(params.in), grads);
 
             try self.backpropInner(cl_alloc, params.in, grads, gradient_tree);
@@ -355,19 +376,17 @@ fn backpropInner(self: TracingExecutor, cl_alloc: *cl.Alloc, id: NodeId, downstr
             const inputs = self.getClTensor(source_id);
             const grads = try self.inner.sigmoidGrad(cl_alloc, downstream_gradients, inputs);
 
-            // FIXME: This only has to happen if it's a gradient we care about
             try self.inner.addAssign(cl_alloc, gradient_tree.get(source_id), grads);
 
             try self.backpropInner(cl_alloc, source_id, grads, gradient_tree);
         },
-        .relu => |source_id| {
-            const inputs = self.getClTensor(source_id);
-            const grads = try self.inner.reluGrad(cl_alloc, downstream_gradients, inputs);
+        .relu => |params| {
+            const inputs = self.getClTensor(params.in);
+            const grads = try self.inner.reluGrad(cl_alloc, downstream_gradients, inputs, params.leak);
 
-            // FIXME: This only has to happen if it's a gradient we care about
-            try self.inner.addAssign(cl_alloc, gradient_tree.get(source_id), grads);
+            try self.inner.addAssign(cl_alloc, gradient_tree.get(params.in), grads);
 
-            try self.backpropInner(cl_alloc, source_id, grads, gradient_tree);
+            try self.backpropInner(cl_alloc, params.in, grads, gradient_tree);
         },
         .add_splat_outer => |params| {
             try self.backpropTwoParams(
@@ -390,6 +409,13 @@ fn backpropInner(self: TracingExecutor, cl_alloc: *cl.Alloc, id: NodeId, downstr
                 math.Executor.matmulGrad,
             );
         },
+        .elem_mul => |params| {
+            const b = self.getClTensor(params.b);
+
+            const a_grads = try self.inner.elemMul(cl_alloc, downstream_gradients, b);
+            try self.inner.addAssign(cl_alloc, gradient_tree.get(params.a), a_grads);
+            try self.backpropInner(cl_alloc, params.a, a_grads, gradient_tree);
+        },
         .conv => |params| {
             try self.backpropTwoParams(
                 cl_alloc,
@@ -409,7 +435,6 @@ fn backpropInner(self: TracingExecutor, cl_alloc: *cl.Alloc, id: NodeId, downstr
 
             const a_grads = try self.inner.bceWithLogitsGrad(cl_alloc, downstream_gradients, a, b);
 
-            // FIXME: This only has to happen if it's a gradient we care about
             try self.inner.addAssign(cl_alloc, gradient_tree.get(params.a), a_grads);
 
             try self.backpropInner(cl_alloc, params.a, a_grads, gradient_tree);
@@ -421,11 +446,8 @@ fn backpropTwoParams(self: TracingExecutor, cl_alloc: *cl.Alloc, params: TwoPara
     const a = self.getClTensor(params.a);
     const b = self.getClTensor(params.b);
 
-    // FIXME: Add cl.Alloc checkpoint
-
     const a_grads, const b_grads = try gradFn(self.inner, cl_alloc, downstream_gradients, a, b);
 
-    // FIXME: This only has to happen if it's a gradient we care about
     try self.inner.addAssign(cl_alloc, gradient_tree.get(params.a), a_grads);
     try self.inner.addAssign(cl_alloc, gradient_tree.get(params.b), b_grads);
 

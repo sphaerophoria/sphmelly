@@ -36,6 +36,7 @@ bce_with_logits_kernel: cl.Executor.Kernel,
 bce_with_logits_grad_kernel: cl.Executor.Kernel,
 add_assign_kernel: cl.Executor.Kernel,
 mul_scalar_kernel: cl.Executor.Kernel,
+elem_mul_kernel: cl.Executor.Kernel,
 rand_kernel: cl.Executor.Kernel,
 gaussian_kernel: cl.Executor.Kernel,
 gaussian_noise_kernel: cl.Executor.Kernel,
@@ -75,6 +76,7 @@ pub fn init(cl_alloc: *cl.Alloc, executor: *cl.Executor) !Executor {
 
     const mul_program = try executor.createProgram(cl_alloc, mul_program_content);
     const mul_scalar_kernel = try mul_program.createKernel(cl_alloc, "mul_scalar");
+    const elem_mul_kernel = try mul_program.createKernel(cl_alloc, "elem_mul");
 
     const gt_program = try executor.createProgram(cl_alloc, gt_program_content);
     const gt_kernel = try gt_program.createKernel(cl_alloc, "gt");
@@ -124,6 +126,7 @@ pub fn init(cl_alloc: *cl.Alloc, executor: *cl.Executor) !Executor {
         .bce_with_logits_grad_kernel = bce_with_logits_grad_kernel,
         .add_assign_kernel = add_assign_kernel,
         .mul_scalar_kernel = mul_scalar_kernel,
+        .elem_mul_kernel = elem_mul_kernel,
         .rand_kernel = rand_kernel,
         .gaussian_kernel = gaussian_kernel,
         .gaussian_noise_kernel = gaussian_noise_kernel,
@@ -162,6 +165,25 @@ pub fn mulScalar(self: Executor, cl_alloc: *cl.Alloc, a: Tensor, b: f32) !Tensor
     try self.executor.executeKernelUntracked(cl_alloc, self.mul_scalar_kernel, n, &.{
         .{ .buf = a.buf },
         .{ .float = b },
+        .{ .buf = ret.buf },
+        .{ .uint = n },
+    });
+
+    return ret;
+}
+
+pub fn elemMul(self: Executor, cl_alloc: *cl.Alloc, a: Tensor, b: Tensor) !Tensor {
+    if (!b.dims.eql(try a.dims.dropOuter())) {
+        return error.InvalidDims;
+    }
+
+    const ret = try self.createTensorUninitialized(cl_alloc, a.dims);
+    const n = a.dims.numElems();
+
+    try self.executor.executeKernelUntracked(cl_alloc, self.elem_mul_kernel, n, &.{
+        .{ .buf = a.buf },
+        .{ .buf = b.buf },
+        .{ .uint = b.dims.numElems() },
         .{ .buf = ret.buf },
         .{ .uint = n },
     });
@@ -682,13 +704,14 @@ pub fn sigmoidGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_grad: Tensor,
     };
 }
 
-pub fn relu(self: Executor, cl_alloc: *cl.Alloc, in: Tensor) !Tensor {
+pub fn relu(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, leak: f32) !Tensor {
     const ret = try self.executor.createBuffer(cl_alloc, .read_write, in.dims.byteSize());
 
     const n = in.dims.numElems();
     try self.executor.executeKernelUntracked(cl_alloc, self.relu_kernel, n, &.{
         .{ .buf = in.buf },
         .{ .buf = ret },
+        .{ .float = leak },
         .{ .uint = n },
     });
 
@@ -698,7 +721,7 @@ pub fn relu(self: Executor, cl_alloc: *cl.Alloc, in: Tensor) !Tensor {
     };
 }
 
-pub fn reluGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_grad: Tensor, in: Tensor) !Tensor {
+pub fn reluGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_grad: Tensor, in: Tensor, leak: f32) !Tensor {
     if (!downstream_grad.dims.eql(in.dims)) {
         std.log.err("downstream {any} does not match in {any}\n", .{ downstream_grad.dims, in.dims });
         return error.InvalidDims;
@@ -711,6 +734,7 @@ pub fn reluGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_grad: Tensor, in
         .{ .buf = downstream_grad.buf },
         .{ .buf = in.buf },
         .{ .buf = ret },
+        .{ .float = leak },
         .{ .uint = n },
     });
 
@@ -1276,15 +1300,15 @@ test "relu" {
     };
     const in_gpu = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, in_cpu, &.{ 3, 2 });
 
-    const out_gpu = try fixture.cl_math.relu(fixture.cl_alloc, in_gpu);
+    const out_gpu = try fixture.cl_math.relu(fixture.cl_alloc, in_gpu, 0.1);
 
     try std.testing.expect(in_gpu.dims.eql(out_gpu.dims));
 
     const out_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, out_gpu);
 
     const expected: []const f32 = &.{
-        0,   0.1, 0,
-        0.5, 3,   0.0,
+        -0.2, 0.1, -0.01,
+        0.5,  3,   0.0,
     };
 
     for (expected, out_cpu) |ex, ac| {
@@ -1309,15 +1333,15 @@ test "reluGrad" {
     const in_gpu = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, in_cpu, &.{ 3, 2 });
     const downstream_grads_gpu = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, downstream_grads_cpu, &.{ 3, 2 });
 
-    const out_gpu = try fixture.cl_math.reluGrad(fixture.cl_alloc, downstream_grads_gpu, in_gpu);
+    const out_gpu = try fixture.cl_math.reluGrad(fixture.cl_alloc, downstream_grads_gpu, in_gpu, 0.1);
 
     try std.testing.expect(in_gpu.dims.eql(out_gpu.dims));
 
     const out_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, out_gpu);
 
     const expected: []const f32 = &.{
-        0, 2, 0,
-        4, 5, 0,
+        0.1, 2, 0.3,
+        4,   5, 0.6,
     };
 
     for (expected, out_cpu) |ex, ac| {
@@ -1884,6 +1908,56 @@ test "maxpool" {
     };
 
     for (expected_grads, grads_cpu) |ex, ac| {
+        try std.testing.expectApproxEqAbs(ex, ac, 0.0001);
+    }
+}
+
+test "elemMul" {
+    var fixture = try ClExecutorFixture.init();
+    defer fixture.deinit();
+
+    // Given tensors
+    // a: (..., N)
+    // b: (...)
+    //
+    // Multiply each element in A, by it's equivalent spot in b
+
+    const a_cpu: []const f32 = &.{
+        // N1
+        1,  2,  3,
+        4,  5,  6,
+
+        // N2
+        7,  8,  9,
+        10, 11, 12,
+    };
+
+    const b_cpu: []const f32 = &.{
+        // N1
+        0.1, 0.2, 0.3,
+        0.4, 0.5, 0.6,
+    };
+
+    const expected_output: []const f32 = &.{
+        // N1
+        0.1, 0.4, 0.9,
+        1.6, 2.5, 3.6,
+
+        // N2
+        0.7, 1.6, 2.7,
+        4.0, 5.5, 7.2,
+    };
+
+    const a = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, a_cpu, &.{ 3, 2, 2 });
+    const b = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, b_cpu, &.{ 3, 2 });
+
+    const ret = try fixture.cl_math.elemMul(fixture.cl_alloc, a, b);
+
+    try std.testing.expect(ret.dims.eql(a.dims));
+
+    const ret_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, ret);
+
+    for (expected_output, ret_cpu) |ex, ac| {
         try std.testing.expectApproxEqAbs(ex, ac, 0.0001);
     }
 }

@@ -348,3 +348,46 @@ pub fn gradTensorToRgbaCpuAlpha(alloc: std.mem.Allocator, data: []const f32, dim
         .width = dims[0],
     };
 }
+
+pub fn makeBBoxGLBuffer(gl_alloc: *sphrender.GlAlloc, box: []const f32, program: *sphrender.xyt_program.SolidColorProgram) !sphrender.xyt_program.RenderSource {
+    // [5]f32, x, y, w, h, rx, ry
+    const x_x = box[4];
+    const x_y = box[5];
+
+    const theta = std.math.atan2(x_y, x_x);
+
+    // OpenGL space is 2x as wide, so we take half width in normalized
+    // space and double for opengl lol
+    //
+    // Note width and height are sqrt as inspired by YOLOv1 paper
+    const half_width: sphtud.math.Vec2 = @splat(box[2] * box[2]);
+    const half_height: sphtud.math.Vec2 = @splat(box[3] * box[3]);
+
+    // cx/cy are represented as offsets from center in normalized space, OpenGL
+    // space is the same but 2x the distance
+    const cx = box[0] * 2.0;
+    const cy = box[1] * 2.0;
+
+    const center = sphtud.math.Vec2{ cx, cy };
+
+    const sint = @sin(theta);
+    const cost = @cos(theta);
+    const x_axis = sphtud.math.Vec2{ cost, sint };
+    const y_axis = sphtud.math.Vec2{ -sint, cost };
+
+    const points: []const sphrender.xyt_program.Vertex = &.{
+        .{ .vPos = center + half_width * x_axis },
+        .{ .vPos = center + half_width * x_axis - half_height * y_axis },
+        .{ .vPos = center - half_width * x_axis - half_height * y_axis },
+        .{ .vPos = center - half_width * x_axis + half_height * y_axis },
+        .{ .vPos = center + half_width * x_axis + half_height * y_axis },
+        .{ .vPos = center + half_width * x_axis },
+        .{ .vPos = center },
+    };
+
+    const gl_buf = try sphrender.xyt_program.Buffer.init(gl_alloc, points);
+    var render_source = try sphrender.xyt_program.RenderSource.init(gl_alloc);
+    render_source.bindData(program.handle(), gl_buf);
+
+    return render_source;
+}

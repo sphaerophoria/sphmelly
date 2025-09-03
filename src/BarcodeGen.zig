@@ -54,10 +54,10 @@ pub fn init(scratch: sphtud.alloc.LinearAllocator, cl_alloc: *cl.Alloc, math_exe
 const Bars = struct {
     imgs: math.Executor.Tensor,
     masks: math.Executor.Tensor,
-    orientations: math.Executor.Tensor,
+    bounding_boxes: math.Executor.Tensor,
 };
 
-pub fn makeBars(self: BarcodeGen, cl_alloc: *cl.Alloc, rand_params: RandomizationParams, num_images: u32, rand_source: *math.RandSource) !Bars {
+pub fn makeBars(self: BarcodeGen, cl_alloc: *cl.Alloc, rand_params: RandomizationParams, enable_backgrounds: bool, num_images: u32, rand_source: *math.RandSource) !Bars {
     const out_dims = try math.TensorDims.init(cl_alloc.heap(), &.{ self.background_size, self.background_size, num_images });
 
     const num_barcodes = out_dims.get(2);
@@ -66,13 +66,13 @@ pub fn makeBars(self: BarcodeGen, cl_alloc: *cl.Alloc, rand_params: Randomizatio
     const blur_kernels = try self.makeBlurKernels(cl_alloc, 5, num_barcodes, rand_source, rand_params);
     const instanced = try self.instanceRandParams(cl_alloc, sample_buf, rand_source, rand_params, out_dims);
 
-    const pass1_out = try self.runFirstPass(cl_alloc, instanced.params_buf, out_dims);
+    const pass1_out = try self.runFirstPass(cl_alloc, instanced.params_buf, out_dims, enable_backgrounds);
     const pass2_out = try self.math_executor.maskedConv(cl_alloc, pass1_out.imgs, pass1_out.masks, blur_kernels);
 
     return .{
         .imgs = pass2_out,
         .masks = pass1_out.masks,
-        .orientations = instanced.orientations,
+        .bounding_boxes = instanced.bounding_boxes,
     };
 }
 
@@ -94,7 +94,7 @@ fn makeSampleBuf(self: BarcodeGen, cl_alloc: *cl.Alloc, rand_source: *math.RandS
 
 const RandParams = struct {
     params_buf: math.Executor.Tensor,
-    orientations: math.Executor.Tensor,
+    bounding_boxes: math.Executor.Tensor,
 };
 
 fn instanceRandParams(
@@ -110,8 +110,8 @@ fn instanceRandParams(
     const total_params_buf_size = params_struct_size * num_barcodes;
     const params_buf = try self.math_executor.createTensorUninitialized(cl_alloc, &.{total_params_buf_size});
 
-    // x,y per barcode
-    const orientations = try self.math_executor.createTensorUninitialized(cl_alloc, &.{ 2, num_barcodes });
+    // x,y,w,h,x_x,x_y per barcode
+    const bounding_boxes = try self.math_executor.createTensorUninitialized(cl_alloc, &.{ 6, num_barcodes });
 
     // This fn call may look like a disaster, but it seems better than trying
     // to coordinate struct layout between zig on host and C on GPU
@@ -122,8 +122,8 @@ fn instanceRandParams(
         .{ .uint = params_struct_size },
         // sample_buf_space,
         .{ .buf = sample_buf.buf },
-        // orientations_out
-        .{ .buf = orientations.buf },
+        // bbox_out
+        .{ .buf = bounding_boxes.buf },
         // n,
         .{ .uint = num_barcodes },
         // img_width,
@@ -175,7 +175,7 @@ fn instanceRandParams(
     rand_source.ctr += num_barcodes;
     return .{
         .params_buf = params_buf,
-        .orientations = orientations,
+        .bounding_boxes = bounding_boxes,
     };
 }
 
@@ -184,7 +184,7 @@ const Pass1Outputs = struct {
     imgs: math.Executor.Tensor,
 };
 
-fn runFirstPass(self: BarcodeGen, cl_alloc: *cl.Alloc, params_buf: math.Executor.Tensor, dims: math.TensorDims) !Pass1Outputs {
+fn runFirstPass(self: BarcodeGen, cl_alloc: *cl.Alloc, params_buf: math.Executor.Tensor, dims: math.TensorDims, enable_backgrounds: bool) !Pass1Outputs {
     const masks = try self.math_executor.createTensorFilled(cl_alloc, dims, 0.0);
     const imgs = try self.math_executor.createTensorUninitialized(cl_alloc, dims);
 
@@ -196,6 +196,7 @@ fn runFirstPass(self: BarcodeGen, cl_alloc: *cl.Alloc, params_buf: math.Executor
         .{ .buf = self.backgrounds.buf },
         .{ .uint = dims.get(0) },
         .{ .uint = dims.get(1) },
+        .{ .uint = @intFromBool(enable_backgrounds) },
         .{ .uint = dims.get(2) },
     });
 

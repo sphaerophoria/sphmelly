@@ -261,6 +261,8 @@ pub fn sigmoidLayer(comptime Executor: type) Layer(Executor) {
 
 pub fn Relu(comptime Executor: type) type {
     return struct {
+        leak: f32,
+
         const Self = @This();
 
         const layer_vtable = Layer(Executor).VTable{
@@ -269,17 +271,23 @@ pub fn Relu(comptime Executor: type) type {
             .registerWeights = assignIfTracing(Executor, nullRegisterWeights),
         };
 
-        fn execute(_: ?*anyopaque, cl_alloc: *cl.Alloc, executor: *Executor, input: Executor.Tensor) !Executor.Tensor {
-            return executor.relu(cl_alloc, input);
+        fn execute(ctx: ?*anyopaque, cl_alloc: *cl.Alloc, executor: *Executor, input: Executor.Tensor) !Executor.Tensor {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            return executor.relu(cl_alloc, input, self.leak);
         }
     };
 }
 
-pub fn reluLayer(comptime Executor: type) Layer(Executor) {
+pub fn reluLayer(comptime Executor: type, alloc: std.mem.Allocator, leak: f32) !Layer(Executor) {
+    const relu = try alloc.create(Relu(Executor));
+    relu.* = .{
+        .leak = leak,
+    };
+
     return .{
         .vtable = &Relu(Executor).layer_vtable,
         .name = "relu",
-        .ctx = null,
+        .ctx = relu,
     };
 }
 
