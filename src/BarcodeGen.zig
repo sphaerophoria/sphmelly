@@ -55,6 +55,7 @@ const Bars = struct {
     imgs: math.Executor.Tensor,
     masks: math.Executor.Tensor,
     orientations: math.Executor.Tensor,
+    bounding_boxes: math.Executor.Tensor,
 };
 
 pub fn makeBars(self: BarcodeGen, cl_alloc: *cl.Alloc, rand_params: RandomizationParams, num_images: u32, rand_source: *math.RandSource) !Bars {
@@ -73,6 +74,7 @@ pub fn makeBars(self: BarcodeGen, cl_alloc: *cl.Alloc, rand_params: Randomizatio
         .imgs = pass2_out,
         .masks = pass1_out.masks,
         .orientations = instanced.orientations,
+        .bounding_boxes = instanced.bounding_boxes,
     };
 }
 
@@ -95,6 +97,7 @@ fn makeSampleBuf(self: BarcodeGen, cl_alloc: *cl.Alloc, rand_source: *math.RandS
 const RandParams = struct {
     params_buf: math.Executor.Tensor,
     orientations: math.Executor.Tensor,
+    bounding_boxes: math.Executor.Tensor,
 };
 
 fn instanceRandParams(
@@ -113,6 +116,9 @@ fn instanceRandParams(
     // x,y per barcode
     const orientations = try self.math_executor.createTensorUninitialized(cl_alloc, &.{ 2, num_barcodes });
 
+    // x,y,w,h,rot per barcode
+    const bounding_boxes = try self.math_executor.createTensorUninitialized(cl_alloc, &.{ 5, num_barcodes });
+
     // This fn call may look like a disaster, but it seems better than trying
     // to coordinate struct layout between zig on host and C on GPU
     try self.math_executor.executor.executeKernelUntracked(cl_alloc, self.sample_params_kernel, num_barcodes, &.{
@@ -124,6 +130,8 @@ fn instanceRandParams(
         .{ .buf = sample_buf.buf },
         // orientations_out
         .{ .buf = orientations.buf },
+        // bbox_out
+        .{ .buf = bounding_boxes.buf },
         // n,
         .{ .uint = num_barcodes },
         // img_width,
@@ -176,6 +184,7 @@ fn instanceRandParams(
     return .{
         .params_buf = params_buf,
         .orientations = orientations,
+        .bounding_boxes = bounding_boxes,
     };
 }
 

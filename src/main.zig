@@ -512,16 +512,13 @@ const TrainingInput = struct {
 fn generateTrainingInput(cl_alloc: *cl.Alloc, barcode_gen: *BarcodeGen, rand_params: BarcodeGen.RandomizationParams, math_executor: math.Executor, rand_source: *math.RandSource, notifier: *TrainNotifier) !TrainingInput {
     const bars = try barcode_gen.makeBars(cl_alloc, rand_params, train_num_images, rand_source);
 
-    const masks_reshaped = try math_executor.reshape(cl_alloc, bars.masks, &.{ barcode_size, barcode_size, 1, train_num_images });
-    const expected = try math_executor.maxpool(cl_alloc, masks_reshaped, 16);
-
-    try notifier.batchGenerationQueued(bars.imgs, bars.orientations, expected);
+    try notifier.batchGenerationQueued(bars.imgs, bars.orientations, bars.bounding_boxes);
 
     const batch_cl_4d = try math_executor.reshape(cl_alloc, bars.imgs, &.{ barcode_size, barcode_size, 1, train_num_images });
 
     return .{
         .input = batch_cl_4d,
-        .expected = expected,
+        .expected = bars.bounding_boxes,
     };
 }
 
@@ -579,9 +576,19 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8) !void {
         layer_gen.relu(),
 
         try layer_gen.reshape(cl_alloc.heap(), &.{ 16 * 16 * 32, train_num_images }),
-        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 16 * 16 * 32, 16 * 16),
-        try layer_gen.reshape(cl_alloc.heap(), &.{ 16, 16, 1, train_num_images }),
-        layer_gen.sigmoid(),
+
+        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 16 * 16 * 32, 64),
+        layer_gen.relu(),
+
+        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 64, 32),
+        layer_gen.relu(),
+
+        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 32, 16),
+        layer_gen.relu(),
+
+        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 16, 5),
+
+        try layer_gen.reshape(cl_alloc.heap(), &.{ 5, train_num_images }),
     };
 
     var barcode_gen = try BarcodeGen.init(
@@ -601,8 +608,8 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8) !void {
         .x_scale_range = .{ 0.2, 0.4 },
         .aspect_range = .{ 0.4, 1.0 },
         .min_contrast = 0.2,
-        .x_noise_multiplier_range = .{ 5.0, 10.1 },
-        .y_noise_multiplier_range = .{ 5.0, 10.1 },
+        .x_noise_multiplier_range = .{ 0, 0 },
+        .y_noise_multiplier_range = .{ 0, 0 },
         .perlin_grid_size_range = .{ 10, 100 },
         .background_color_range = .{ 0.0, 1.0 },
         // FIXME Blur amount is in pixel space, maybe these should be
@@ -655,7 +662,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8) !void {
                 try notifier.predictionsQueued(results[results.len - 1]);
 
                 const traced_expected = try tracing_executor.appendNode(train_input.expected, .init);
-                const loss = try tracing_executor.bceWithLogits(&cl_alloc, results[results.len - 2], traced_expected);
+                const loss = try tracing_executor.squaredErr(&cl_alloc, results[results.len - 1], traced_expected);
                 try notifier.notifyLoss(loss);
 
                 switch (try trainer.step(loss)) {
@@ -872,8 +879,8 @@ pub fn main() !void {
 
             if (response.train_sample) |sample| {
                 try ui.setImageGrayscale(allocators.scratch.allocator(), sample.img);
-                try ui.addImgOverlayHotCold(allocators.scratch.allocator(), &allocators.scratch_gl, sample.expected, -1);
-                try ui.addImgOverlayHotCold(allocators.scratch.allocator(), &allocators.scratch_gl, sample.prediction, 1);
+                try ui.renderBBoxOverlay(&allocators.scratch_gl, sample.expected, .{ 1, 0, 0 });
+                try ui.renderBBoxOverlay(&allocators.scratch_gl, sample.prediction, .{ 0, 0, 1 });
 
                 ui.params.img_loss = sample.loss;
             } else {
