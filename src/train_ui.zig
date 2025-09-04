@@ -15,6 +15,7 @@ pub const Gui = struct {
             .params = .init(initial_lr),
             .window = undefined,
             .widgets = undefined,
+            // FIXME: Train thread needs to tell us how many images per batch
             .train_num_images = train_num_images,
         };
 

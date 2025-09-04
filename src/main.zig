@@ -500,16 +500,12 @@ const TrainNotifier = struct {
     }
 };
 
-const train_num_images = 64;
-const default_lr = 0.001;
-const barcode_size = 256;
-
 const TrainingInput = struct {
     input: math.Executor.Tensor,
     expected: math.Executor.Tensor,
 };
 
-fn generateTrainingInput(cl_alloc: *cl.Alloc, barcode_gen: *BarcodeGen, rand_params: BarcodeGen.RandomizationParams, math_executor: math.Executor, rand_source: *math.RandSource, notifier: *TrainNotifier) !TrainingInput {
+fn generateTrainingInput(cl_alloc: *cl.Alloc, barcode_gen: *BarcodeGen, rand_params: BarcodeGen.RandomizationParams, math_executor: math.Executor, rand_source: *math.RandSource, notifier: *TrainNotifier, train_num_images: u32, barcode_size: u32) !TrainingInput {
     const bars = try barcode_gen.makeBars(cl_alloc, rand_params, train_num_images, rand_source);
 
     try notifier.batchGenerationQueued(bars.imgs, bars.orientations, bars.bounding_boxes);
@@ -521,6 +517,20 @@ fn generateTrainingInput(cl_alloc: *cl.Alloc, barcode_gen: *BarcodeGen, rand_par
         .expected = bars.bounding_boxes,
     };
 }
+
+const Config = struct {
+    batch_size: u32,
+    img_size: u32,
+    network: nn.Config,
+
+    pub fn parse(leaky: std.mem.Allocator, path: []const u8) !Config {
+        const f = try std.fs.cwd().openFile(path, .{});
+        defer f.close();
+
+        var json_reader = std.json.reader(leaky, f.reader());
+        return try std.json.parseFromTokenSourceLeaky(Config, leaky, &json_reader, .{});
+    }
+};
 
 const InitializerResolver = struct {
     he: nn.Initializer(math.TracingExecutor),
@@ -576,6 +586,9 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, network_co
         .zero = zero_initializer.initializer(),
     };
 
+    var barcode_size: u32 = 0;
+    var train_num_images: u32 = 0;
+    var default_lr: f32 = 0;
     const layers = blk: {
         const scratch = cl_alloc.buf_alloc.backLinear();
 
@@ -584,10 +597,13 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, network_co
 
         try nn.Config.printExample();
 
-        const config_parsed = try nn.Config.parse(scratch.allocator(), network_config);
+        const config_parsed = try Config.parse(scratch.allocator(), network_config);
+        barcode_size = config_parsed.img_size;
+        train_num_images = config_parsed.batch_size;
         std.debug.print("{any}\n", .{config_parsed});
-        const layers: []nn.Layer(math.TracingExecutor) = try cl_alloc.heap().alloc(nn.Layer(math.TracingExecutor), config_parsed.layers.len);
-        for (config_parsed.layers, layers) |layer_def, *layer| {
+        const layers: []nn.Layer(math.TracingExecutor) = try cl_alloc.heap().alloc(nn.Layer(math.TracingExecutor), config_parsed.network.layers.len);
+        default_lr = config_parsed.network.lr;
+        for (config_parsed.network.layers, layers) |layer_def, *layer| {
 
             layer.* = switch(layer_def) {
                 // FIXME: Can we splat the tuple?
@@ -668,6 +684,8 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, network_co
                     math_executor,
                     &rand_source,
                     &notifier,
+                    train_num_images,
+                    barcode_size,
                 );
 
                 const results = try nn.runLayers(&cl_alloc, train_input.input, layers, &tracing_executor);
@@ -810,7 +828,14 @@ pub fn main() !void {
     const args = try Args.parse(allocators.root.arena());
 
     var ui: train_ui.Gui = undefined;
-    try ui.initPinned(&allocators, default_lr, train_num_images);
+    {
+
+        const cp = allocators.scratch.checkpoint();
+        defer allocators.scratch.restore(cp);
+
+        const config_parsed = try Config.parse(allocators.scratch.allocator(), args.network_config);
+        try ui.initPinned(&allocators, config_parsed.network.lr, config_parsed.batch_size);
+    }
 
     var comms = SharedChannels{};
 
