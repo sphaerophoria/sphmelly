@@ -2,6 +2,7 @@ const std = @import("std");
 const sphtud = @import("sphtud");
 const cl = @import("cl.zig");
 const math = @import("math.zig");
+pub const Config = @import("nn/Config.zig");
 
 fn isTracing(comptime T: type) bool {
     switch (T) {
@@ -53,12 +54,31 @@ pub fn Layer(comptime Executor: type) type {
     };
 }
 
+pub fn Initializer(comptime Executor: type) type {
+    return struct {
+        generate_fn: *const fn (ctx: ?*anyopaque, cl_alloc: *cl.Alloc, fan_in: usize, dims: []const u32) anyerror!Executor.Tensor,
+        ctx: ?*anyopaque,
+
+        pub fn generate(self: @This(), cl_alloc: *cl.Alloc, fan_in: usize, dims: []const u32) !Executor.Tensor {
+            return self.generate_fn(self.ctx, cl_alloc, fan_in, dims);
+        }
+    };
+}
+
 pub fn HeInitializer(comptime Executor: type) type {
     return struct {
         executor: *Executor,
         rand_source: *math.RandSource,
 
-        pub fn generate(self: @This(), cl_alloc: *cl.Alloc, fan_in: usize, dims: anytype) !Executor.Tensor {
+        pub fn initializer(self: *const @This()) Initializer(Executor) {
+            return .{
+                .generate_fn = generate,
+                .ctx = @constCast(self),
+            };
+        }
+
+        fn generate(ctx: ?*anyopaque, cl_alloc: *cl.Alloc, fan_in: usize, dims: []const u32) !Executor.Tensor {
+            const self: *const @This() = @ptrCast(@alignCast(ctx));
             const stddev = std.math.sqrt(2 / @as(f32, @floatFromInt(fan_in)));
             return self.executor.randGaussian(cl_alloc, dims, stddev, self.rand_source);
         }
@@ -69,7 +89,15 @@ pub fn ZeroInitializer(comptime Executor: type) type {
     return struct {
         executor: *Executor,
 
-        pub fn generate(self: @This(), cl_alloc: *cl.Alloc, _: usize, dims: anytype) !Executor.Tensor {
+        pub fn initializer(self: *const @This()) Initializer(Executor) {
+            return .{
+                .generate_fn = generate,
+                .ctx = @constCast(self),
+            };
+        }
+
+        pub fn generate(ctx: ?*anyopaque, cl_alloc: *cl.Alloc, _: usize, dims: []const u32) !Executor.Tensor {
+            const self: *const @This() = @ptrCast(@alignCast(ctx));
             return try self.executor.createTensorFilled(cl_alloc, dims, 0.0);
         }
     };
@@ -82,17 +110,6 @@ pub fn FullyConnected(comptime Executor: type) type {
         name: []const u8,
 
         const Self = @This();
-
-        pub fn init(cl_alloc: *cl.Alloc, weights_initializer: anytype, bias_initializer: anytype, inputs: u32, outputs: u32) !Self {
-            const weights = try weights_initializer.generate(cl_alloc, inputs, &.{ inputs, outputs });
-            const biases = try bias_initializer.generate(cl_alloc, inputs, &.{ 1, outputs });
-
-            return .{
-                .weights = weights,
-                .name = try std.fmt.allocPrint(cl_alloc.heap(), "fc ({d} -> {d})", .{ inputs, outputs }),
-                .biases = biases,
-            };
-        }
 
         const layer_vtable = Layer(Executor).VTable{
             .getWeights = getWeights,
@@ -137,22 +154,26 @@ pub fn FullyConnected(comptime Executor: type) type {
     };
 }
 
+fn fullyConnectedLayer(comptime Executor: type, cl_alloc: *cl.Alloc, weights_initializer: Initializer(Executor), bias_initializer: Initializer(Executor), inputs: u32, outputs: u32) !Layer(Executor) {
+    const weights = try weights_initializer.generate(cl_alloc, inputs, &.{ inputs, outputs });
+    const biases = try bias_initializer.generate(cl_alloc, inputs, &.{ 1, outputs });
+
+    const fc_layer = try cl_alloc.heap().create(FullyConnected(Executor));
+    fc_layer.* = .{
+        .weights = weights,
+        .name = try std.fmt.allocPrint(cl_alloc.heap(), "fc ({d} -> {d})", .{ inputs, outputs }),
+        .biases = biases,
+    };
+
+    return fc_layer.layer();
+}
+
 pub fn Conv(comptime Executor: type) type {
     return struct {
         name: []const u8,
         kernel: Executor.Tensor,
 
         const Self = @This();
-
-        pub fn init(cl_alloc: *cl.Alloc, weights_initializer: anytype, w: u32, h: u32, in_c: u32, out_c: u32) !Self {
-            const fan_in = w * h * in_c;
-            const kernel = try weights_initializer.generate(cl_alloc, fan_in, &.{ w, h, in_c, out_c });
-
-            return .{
-                .name = try std.fmt.allocPrint(cl_alloc.heap(), "conv {d}x{d}x{d}x{d}", .{ w, h, in_c, out_c }),
-                .kernel = kernel,
-            };
-        }
 
         const layer_vtable = Layer(Executor).VTable{
             .getWeights = getWeights,
@@ -184,6 +205,19 @@ pub fn Conv(comptime Executor: type) type {
             };
         }
     };
+}
+
+pub fn convLayer(comptime Executor: type, cl_alloc: *cl.Alloc, weights_initializer: Initializer(Executor), w: u32, h: u32, in_c: u32, out_c: u32) !Layer(Executor) {
+    const fan_in = w * h * in_c;
+    const kernel = try weights_initializer.generate(cl_alloc, fan_in, &.{ w, h, in_c, out_c });
+
+    const conv_layer = try cl_alloc.heap().create(Conv(Executor));
+    conv_layer.* = .{
+        .name = try std.fmt.allocPrint(cl_alloc.heap(), "conv {d}x{d}x{d}x{d}", .{ w, h, in_c, out_c }),
+        .kernel = kernel,
+    };
+
+    return conv_layer.layer();
 }
 
 pub fn MaxPool(comptime Executor: type) type {
@@ -297,12 +331,6 @@ pub fn Reshape(comptime Executor: type) type {
 
         const Self = @This();
 
-        pub fn init(shape: []const u32) !Self {
-            return .{
-                .shape = shape,
-            };
-        }
-
         const layer_vtable = Layer(Executor).VTable{
             .getWeights = nullGetWeights(Executor),
             .execute = execute,
@@ -319,9 +347,27 @@ pub fn Reshape(comptime Executor: type) type {
 
         fn execute(ctx: ?*anyopaque, cl_alloc: *cl.Alloc, executor: *Executor, input: Executor.Tensor) !Executor.Tensor {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            return executor.reshape(cl_alloc, input, self.shape);
+
+            const n = input.dims.get(input.dims.len() - 1);
+            var tmp_dims_buf: [10]u32 = undefined;
+            for (self.shape, tmp_dims_buf[0..self.shape.len]) |in, *out| {
+                out.* = in;
+            }
+
+            tmp_dims_buf[self.shape.len] = n;
+            return executor.reshape(cl_alloc, input, tmp_dims_buf[0 .. self.shape.len + 1]);
         }
     };
+}
+
+pub fn reshapeLayer(comptime Executor: type, alloc: std.mem.Allocator, dims: []const u32) !Layer(Executor) {
+    const reshape_layer = try alloc.create(Reshape(Executor));
+
+    reshape_layer.* = .{
+        .shape = try alloc.dupe(u32, dims),
+    };
+
+    return reshape_layer.layer();
 }
 
 pub const Optimizer = struct {
@@ -398,6 +444,64 @@ pub fn runLayers(alloc: *cl.Alloc, batch: math.Executor.Tensor, layers: []const 
     }
 
     return ret;
+}
+
+pub fn Initializers(comptime Executor: type) type {
+    return struct {
+        he: HeInitializer(Executor),
+        zero: ZeroInitializer(Executor),
+
+        pub fn resolve(self: @This(), config_type: Config.Initializer) Initializer(math.TracingExecutor) {
+            switch (config_type) {
+                .he => return self.he.initializer(),
+                .zero => return self.zero.initializer(),
+            }
+        }
+    };
+}
+
+pub fn makeInitializers(executor: anytype, rand_source: *math.RandSource) Initializers(@TypeOf(executor.*)) {
+    return .{
+        .he = .{
+            .executor = executor,
+            .rand_source = rand_source,
+        },
+        .zero = .{
+            .executor = executor,
+        },
+    };
+}
+
+pub fn modelFromConfig(cl_alloc: *cl.Alloc, executor: anytype, initializers: Initializers(@TypeOf(executor.*)), layer_config: []const Config.LayerDef) ![]Layer(@TypeOf(executor.*)) {
+    const Executor = @TypeOf(executor.*);
+    const layers: []Layer(Executor) = try cl_alloc.heap().alloc(Layer(Executor), layer_config.len);
+
+    for (layer_config, layers) |layer_def, *layer| {
+        layer.* = switch (layer_def) {
+            .conv => |params| try convLayer(
+                Executor,
+                cl_alloc,
+                initializers.resolve(params[0]),
+                params[1],
+                params[2],
+                params[3],
+                params[4],
+            ),
+            .relu => |leak| try reluLayer(Executor, cl_alloc.heap(), leak),
+            .maxpool => |params| try maxpoolLayer(Executor, cl_alloc.heap(), params),
+            .reshape => |params| try reshapeLayer(Executor, cl_alloc.heap(), params),
+            .fully_connected => |params| try fullyConnectedLayer(
+                Executor,
+                cl_alloc,
+                initializers.resolve(params[0]),
+                initializers.resolve(params[1]),
+                params[2],
+                params[3],
+            ),
+        };
+    }
+
+    return layers;
 }
 
 pub fn Trainer(comptime Notifier: type) type {

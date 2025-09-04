@@ -14,51 +14,6 @@ const Optimizer = nn.Optimizer;
 const AppAllocators = sphrender.AppAllocators(100);
 const train_ui = @import("train_ui.zig");
 
-fn OpenClLayerGen(comptime Executor: type) type {
-    return struct {
-        cl_alloc: *cl.Alloc,
-        math_executor: *Executor,
-
-        const Self = @This();
-
-        fn fullyConnected(self: Self, alloc: std.mem.Allocator, weights_initializer: anytype, bias_initializer: anytype, inputs: u32, outputs: u32) !nn.Layer(Executor) {
-            const fc = try alloc.create(nn.FullyConnected(Executor));
-            fc.* = try nn.FullyConnected(Executor).init(
-                self.cl_alloc,
-                weights_initializer,
-                bias_initializer,
-                inputs,
-                outputs,
-            );
-            return fc.layer();
-        }
-
-        fn conv(self: Self, alloc: std.mem.Allocator, weights_initializer: anytype, w: u32, h: u32, in_c: u32, out_c: u32) !nn.Layer(Executor) {
-            const conv_layer = try alloc.create(nn.Conv(Executor));
-            conv_layer.* = try nn.Conv(Executor).init(self.cl_alloc, weights_initializer, w, h, in_c, out_c);
-            return conv_layer.layer();
-        }
-
-        fn maxpoolLayer(self: Self, stride: u32) !nn.Layer(Executor) {
-            return nn.maxpoolLayer(Executor, self.cl_alloc.heap(), stride);
-        }
-
-        fn reshape(_: Self, alloc: std.mem.Allocator, dims: []const u32) !nn.Layer(Executor) {
-            const layer = try alloc.create(nn.Reshape(Executor));
-            layer.* = try nn.Reshape(Executor).init(dims);
-            return layer.layer();
-        }
-
-        fn sigmoid(_: Self) nn.Layer(Executor) {
-            return nn.sigmoidLayer(Executor);
-        }
-
-        fn relu(self: Self, leak: f32) !nn.Layer(Executor) {
-            return nn.reluLayer(Executor, self.cl_alloc.heap(), leak);
-        }
-    };
-}
-
 const GuiDataReq = struct {
     alloc_buf: []u8,
     loss: bool,
@@ -490,16 +445,12 @@ const TrainNotifier = struct {
     }
 };
 
-const train_num_images = 64;
-const default_lr = 0.004;
-const barcode_size = 256 * 3 / 4;
-
 const TrainingInput = struct {
     input: math.Executor.Tensor,
     expected: math.Executor.Tensor,
 };
 
-fn generateTrainingInput(cl_alloc: *cl.Alloc, barcode_gen: *BarcodeGen, rand_params: BarcodeGen.RandomizationParams, math_executor: math.Executor, rand_source: *math.RandSource, notifier: *TrainNotifier) !TrainingInput {
+fn generateTrainingInput(cl_alloc: *cl.Alloc, barcode_gen: *BarcodeGen, rand_params: BarcodeGen.RandomizationParams, math_executor: math.Executor, rand_source: *math.RandSource, notifier: *TrainNotifier, train_num_images: u32, barcode_size: u32) !TrainingInput {
     const bars = try barcode_gen.makeBars(cl_alloc, rand_params, false, train_num_images, rand_source);
 
     try notifier.batchGenerationQueued(bars.imgs, bars.bounding_boxes);
@@ -512,7 +463,21 @@ fn generateTrainingInput(cl_alloc: *cl.Alloc, barcode_gen: *BarcodeGen, rand_par
     };
 }
 
-fn trainThread(channels: *SharedChannels, background_dir: []const u8) !void {
+const Config = struct {
+    batch_size: u32,
+    img_size: u32,
+    network: nn.Config,
+
+    pub fn parse(leaky: std.mem.Allocator, path: []const u8) !Config {
+        const f = try std.fs.cwd().openFile(path, .{});
+        defer f.close();
+
+        var json_reader = std.json.reader(leaky, f.reader());
+        return try std.json.parseFromTokenSourceLeaky(Config, leaky, &json_reader, .{});
+    }
+};
+
+fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Config) !void {
     const cl_alloc_buf = try std.heap.page_allocator.alloc(u8, 1 * 1024 * 1024);
     defer std.heap.page_allocator.free(cl_alloc_buf);
 
@@ -526,71 +491,17 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8) !void {
     defer cl_executor.deinit();
 
     const math_executor = try math.Executor.init(&cl_alloc, &cl_executor);
-    var tracing_executor = try math.TracingExecutor.init(math_executor, cl_alloc.heap(), 100);
+    var tracing_executor = try math.TracingExecutor.init(math_executor, cl_alloc.heap(), 1000);
 
     var notifier = TrainNotifier.init(&cl_alloc, channels, &tracing_executor);
-
-    const layer_gen = OpenClLayerGen(math.TracingExecutor){
-        .math_executor = &tracing_executor,
-        .cl_alloc = &cl_alloc,
-    };
 
     var rand_source = math.RandSource{
         .ctr = 0,
         .seed = 1,
     };
 
-    const he_initializer = nn.HeInitializer(math.TracingExecutor){
-        .executor = &tracing_executor,
-        .rand_source = &rand_source,
-    };
-
-    const zero_initializer = nn.ZeroInitializer(math.TracingExecutor){
-        .executor = &tracing_executor,
-    };
-
-    const layers: []const nn.Layer(math.TracingExecutor) = &.{
-        try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 1, 4),
-        try layer_gen.relu(0.1),
-        try layer_gen.maxpoolLayer(2),
-
-        try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 4, 4),
-        try layer_gen.relu(0.1),
-        try layer_gen.conv(cl_alloc.heap(), he_initializer, 1, 1, 4, 4),
-        try layer_gen.relu(0.1),
-        try layer_gen.maxpoolLayer(2),
-
-        try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 4, 4),
-        try layer_gen.relu(0.1),
-
-        try layer_gen.conv(cl_alloc.heap(), he_initializer, 1, 1, 4, 4),
-        try layer_gen.relu(0.1),
-        try layer_gen.maxpoolLayer(2),
-
-        try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 4, 4),
-        try layer_gen.relu(0.1),
-
-        try layer_gen.conv(cl_alloc.heap(), he_initializer, 1, 1, 4, 4),
-        try layer_gen.relu(0.1),
-        try layer_gen.maxpoolLayer(2),
-
-        try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 4, 4),
-        try layer_gen.relu(0.1),
-        try layer_gen.conv(cl_alloc.heap(), he_initializer, 1, 1, 4, 4),
-        try layer_gen.relu(0.1),
-
-        try layer_gen.reshape(cl_alloc.heap(), &.{ barcode_size / 16 * barcode_size / 16 * 4, train_num_images }),
-
-        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, barcode_size / 16 * barcode_size / 16 * 4, 128),
-        try layer_gen.relu(0.1),
-
-        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 128, 128),
-        try layer_gen.relu(0.1),
-
-        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 128, 6),
-
-        try layer_gen.reshape(cl_alloc.heap(), &.{ 6, train_num_images }),
-    };
+    const initializers = nn.makeInitializers(&tracing_executor, &rand_source);
+    const layers = try nn.modelFromConfig(&cl_alloc, &tracing_executor, initializers, config.network.layers);
 
     var barcode_gen = try BarcodeGen.init(
         // Probably a bit of a violation of separation, but we know that
@@ -600,7 +511,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8) !void {
         &cl_alloc,
         math_executor,
         background_dir,
-        barcode_size,
+        config.img_size,
     );
     const rand_params = BarcodeGen.RandomizationParams{
         // FIXME offset range should probably be a ratio of image size, not absolute pixels
@@ -620,7 +531,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8) !void {
 
     var trainer = nn.Trainer(TrainNotifier){
         .optimizer = try .init(.{
-            .lr = default_lr,
+            .lr = config.network.lr,
             .executor = &tracing_executor,
             .cl_alloc = &cl_alloc,
         }),
@@ -656,6 +567,8 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8) !void {
                     math_executor,
                     &rand_source,
                     &notifier,
+                    config.batch_size,
+                    config.img_size,
                 );
 
                 const results = try nn.runLayers(&cl_alloc, train_input.input, layers, &tracing_executor);
@@ -731,9 +644,11 @@ const TrainingReqDoubleBuffer = struct {
 
 const Args = struct {
     background_dir: []const u8,
+    config: []const u8,
 
     const Switch = enum {
         @"--background-dir",
+        @"--config",
     };
 
     fn parse(alloc: std.mem.Allocator) !Args {
@@ -742,6 +657,7 @@ const Args = struct {
         const process_name = it.next() orelse "sphmelly";
 
         var background_dir: ?[]const u8 = null;
+        var config: ?[]const u8 = null;
 
         while (it.next()) |arg| {
             const s = std.meta.stringToEnum(Switch, arg) orelse {
@@ -754,12 +670,20 @@ const Args = struct {
                     std.log.err("Missing background dir arg", .{});
                     help(process_name);
                 },
+                .@"--config" => config = it.next() orelse {
+                    std.log.err("Missing config arg", .{});
+                    help(process_name);
+                },
             }
         }
 
         return .{
             .background_dir = background_dir orelse {
                 std.log.err("background dir not provided", .{});
+                help(process_name);
+            },
+            .config = config orelse {
+                std.log.err("config not provided", .{});
                 help(process_name);
             },
         };
@@ -773,24 +697,28 @@ const Args = struct {
             \\
             \\Required args:
             \\--background-dir: Where to load image backgrounds from
+            \\--config: Training configuration path
             \\
         , .{process_name}) catch {};
 
         std.process.exit(1);
     }
 };
+
 pub fn main() !void {
     var allocators: AppAllocators = undefined;
     try allocators.initPinned(30 * 1024 * 1024);
 
     const args = try Args.parse(allocators.root.arena());
 
+    const config = try Config.parse(allocators.root.arena(), args.config);
+
     var ui: train_ui.Gui = undefined;
-    try ui.initPinned(&allocators, default_lr, train_num_images);
+    try ui.initPinned(&allocators, config.network.lr, config.batch_size);
 
     var comms = SharedChannels{};
 
-    const train_thread = try std.Thread.spawn(.{}, trainThread, .{ &comms, args.background_dir });
+    const train_thread = try std.Thread.spawn(.{}, trainThread, .{ &comms, args.background_dir, config });
     defer blk: {
         comms.gui_to_train.send(.shutdown) catch break :blk;
         train_thread.join();
