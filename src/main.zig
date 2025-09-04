@@ -500,8 +500,8 @@ const TrainNotifier = struct {
     }
 };
 
-const train_num_images = 300;
-const default_lr = 0.004;
+const train_num_images = 64;
+const default_lr = 0.001;
 const barcode_size = 256;
 
 const TrainingInput = struct {
@@ -566,29 +566,43 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8) !void {
 
         try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 4, 8),
         layer_gen.relu(),
-        try layer_gen.maxpoolLayer(4),
-
-        try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 8, 16),
+        try layer_gen.conv(cl_alloc.heap(), he_initializer, 1, 1, 8, 16),
         layer_gen.relu(),
         try layer_gen.maxpoolLayer(2),
 
         try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 16, 32),
         layer_gen.relu(),
 
-        try layer_gen.reshape(cl_alloc.heap(), &.{ 16 * 16 * 32, train_num_images }),
+        try layer_gen.conv(cl_alloc.heap(), he_initializer, 1, 1, 32, 32),
+        layer_gen.relu(),
+        try layer_gen.maxpoolLayer(2),
 
-        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 16 * 16 * 32, 64),
+        try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 32, 64),
         layer_gen.relu(),
 
-        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 64, 32),
+        try layer_gen.conv(cl_alloc.heap(), he_initializer, 1, 1, 64, 64),
+        layer_gen.relu(),
+        try layer_gen.maxpoolLayer(2),
+
+        try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 64, 128),
+        layer_gen.relu(),
+        try layer_gen.conv(cl_alloc.heap(), he_initializer, 1, 1, 128, 128),
         layer_gen.relu(),
 
-        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 32, 16),
+        try layer_gen.reshape(cl_alloc.heap(), &.{ 16 * 16 * 128, train_num_images }),
+
+        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 16 * 16 * 128, 512),
         layer_gen.relu(),
 
-        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 16, 5),
+        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 512, 512),
+        layer_gen.relu(),
 
-        try layer_gen.reshape(cl_alloc.heap(), &.{ 5, train_num_images }),
+        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 512, 256),
+        layer_gen.relu(),
+
+        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 256, 6),
+
+        try layer_gen.reshape(cl_alloc.heap(), &.{ 6, train_num_images }),
     };
 
     var barcode_gen = try BarcodeGen.init(
@@ -662,7 +676,9 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8) !void {
                 try notifier.predictionsQueued(results[results.len - 1]);
 
                 const traced_expected = try tracing_executor.appendNode(train_input.expected, .init);
-                const loss = try tracing_executor.squaredErr(&cl_alloc, results[results.len - 1], traced_expected);
+                const even_loss = try tracing_executor.squaredErr(&cl_alloc, results[results.len - 1], traced_expected);
+                const loss_multipliers = try math_executor.createTensorUntracked(&cl_alloc, &.{ 1, 1, 1, 0.6, 5, 5 }, &.{6});
+                const loss = try tracing_executor.elemMul(&cl_alloc, even_loss, loss_multipliers);
                 try notifier.notifyLoss(loss);
 
                 switch (try trainer.step(loss)) {

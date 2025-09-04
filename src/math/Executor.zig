@@ -36,6 +36,7 @@ bce_with_logits_kernel: cl.Executor.Kernel,
 bce_with_logits_grad_kernel: cl.Executor.Kernel,
 add_assign_kernel: cl.Executor.Kernel,
 mul_scalar_kernel: cl.Executor.Kernel,
+elem_mul_kernel: cl.Executor.Kernel,
 rand_kernel: cl.Executor.Kernel,
 gaussian_kernel: cl.Executor.Kernel,
 gaussian_noise_kernel: cl.Executor.Kernel,
@@ -75,6 +76,7 @@ pub fn init(cl_alloc: *cl.Alloc, executor: *cl.Executor) !Executor {
 
     const mul_program = try executor.createProgram(cl_alloc, mul_program_content);
     const mul_scalar_kernel = try mul_program.createKernel(cl_alloc, "mul_scalar");
+    const elem_mul_kernel = try mul_program.createKernel(cl_alloc, "elem_mul");
 
     const gt_program = try executor.createProgram(cl_alloc, gt_program_content);
     const gt_kernel = try gt_program.createKernel(cl_alloc, "gt");
@@ -124,6 +126,7 @@ pub fn init(cl_alloc: *cl.Alloc, executor: *cl.Executor) !Executor {
         .bce_with_logits_grad_kernel = bce_with_logits_grad_kernel,
         .add_assign_kernel = add_assign_kernel,
         .mul_scalar_kernel = mul_scalar_kernel,
+        .elem_mul_kernel = elem_mul_kernel,
         .rand_kernel = rand_kernel,
         .gaussian_kernel = gaussian_kernel,
         .gaussian_noise_kernel = gaussian_noise_kernel,
@@ -162,6 +165,25 @@ pub fn mulScalar(self: Executor, cl_alloc: *cl.Alloc, a: Tensor, b: f32) !Tensor
     try self.executor.executeKernelUntracked(cl_alloc, self.mul_scalar_kernel, n, &.{
         .{ .buf = a.buf },
         .{ .float = b },
+        .{ .buf = ret.buf },
+        .{ .uint = n },
+    });
+
+    return ret;
+}
+
+pub fn elemMul(self: Executor, cl_alloc: *cl.Alloc, a: Tensor, b: Tensor) !Tensor {
+    if (!b.dims.eql(try a.dims.dropOuter())) {
+        return error.InvalidDims;
+    }
+
+    const ret = try self.createTensorUninitialized(cl_alloc, a.dims);
+    const n = a.dims.numElems();
+
+    try self.executor.executeKernelUntracked(cl_alloc, self.elem_mul_kernel, n, &.{
+        .{ .buf = a.buf },
+        .{ .buf = b.buf },
+        .{ .uint = b.dims.numElems() },
         .{ .buf = ret.buf },
         .{ .uint = n },
     });

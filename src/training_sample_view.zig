@@ -352,7 +352,10 @@ pub fn gradTensorToRgbaCpuAlpha(alloc: std.mem.Allocator, data: []const f32, dim
 pub fn makeBBoxGLBuffer(gl_alloc: *sphrender.GlAlloc, box: []const f32, program: *sphrender.xyt_program.SolidColorProgram) !sphrender.xyt_program.RenderSource {
     // [5]f32, x, y, w, h, theta
     // Normalized coords [0, 1] -> OpenGL coordinates [-1, 1]
-    const theta = box[4];
+    const x_x = box[4];
+    const x_y = box[5];
+
+    const theta = std.math.atan2(x_y, x_x);
 
     // OpenGL space is 2x as wide, so we take half width in normalized
     // space and double for opengl lol

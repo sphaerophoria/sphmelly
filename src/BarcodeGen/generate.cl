@@ -285,7 +285,7 @@ __kernel void sample_barcode_params(
     float y_offs = randFloatBetween(&rng, min_y_offs, max_y_offs);
     float x_scale = randFloatBetween(&rng, min_x_scale, max_x_scale);
     float y_scale = randFloatBetween(&rng, min_aspect * x_scale, max_aspect * x_scale);
-    float rot = randFloatBetween(&rng, -M_PI / 2.0, M_PI / 2.0);
+    float rot = randFloatBetween(&rng, -M_PI / 2.0f, M_PI / 2.0f);
 
     float contrast = randFloatBetween(&rng, min_contrast, 1.0);
     float dark_color = randFloatBetween(&rng, 0.0, 1.0 - contrast);
@@ -320,11 +320,12 @@ __kernel void sample_barcode_params(
     };
     orientations_out[global_id] = (float2){cos(rot), sin(rot)};
 
-    bbox_out[global_id * 5 + 0] = x_offs / (float)img_width;
-    bbox_out[global_id * 5 + 1] = y_offs / (float)img_height;
-    bbox_out[global_id * 5 + 2] = sqrt(x_scale);
-    bbox_out[global_id * 5 + 3] = sqrt(y_scale);
-    bbox_out[global_id * 5 + 4] = rot;
+    bbox_out[global_id * 6 + 0] = x_offs / (float)img_width;
+    bbox_out[global_id * 6 + 1] = y_offs / (float)img_height;
+    bbox_out[global_id * 6 + 2] = sqrt(x_scale);
+    bbox_out[global_id * 6 + 3] = sqrt(y_scale);
+    bbox_out[global_id * 6 + 4] = cos(rot);
+    bbox_out[global_id * 6 + 5] = sin(rot);
 }
 
 bool multisample_barcode(

@@ -116,8 +116,8 @@ fn instanceRandParams(
     // x,y per barcode
     const orientations = try self.math_executor.createTensorUninitialized(cl_alloc, &.{ 2, num_barcodes });
 
-    // x,y,w,h,rot per barcode
-    const bounding_boxes = try self.math_executor.createTensorUninitialized(cl_alloc, &.{ 5, num_barcodes });
+    // x,y,w,h,x_x,x_y per barcode
+    const bounding_boxes = try self.math_executor.createTensorUninitialized(cl_alloc, &.{ 6, num_barcodes });
 
     // This fn call may look like a disaster, but it seems better than trying
     // to coordinate struct layout between zig on host and C on GPU

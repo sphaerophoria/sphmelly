@@ -35,6 +35,7 @@ const Operation = union(enum) {
     conv: TwoParam,
     bce_with_logits: TwoParam,
     transpose: NodeId,
+    elem_mul: TwoParam,
 };
 
 const NodeId = struct { usize };
@@ -223,6 +224,20 @@ pub fn matmul(self: *TracingExecutor, cl_alloc: *cl.Alloc, a: Tensor, b: Tensor)
     );
 }
 
+pub fn elemMul(self: *TracingExecutor, cl_alloc: *cl.Alloc, a: Tensor, b: math.Executor.Tensor) !Tensor {
+    const a_inner = self.getClTensor(a.buf);
+    const b_node = try self.appendNode(b, .init);
+    return try self.appendNode(
+        try self.inner.elemMul(cl_alloc, a_inner, b),
+        .{
+            .elem_mul = .{
+                .a = a.buf,
+                .b = b_node.buf,
+            },
+        },
+    );
+}
+
 pub fn sigmoid(self: *TracingExecutor, cl_alloc: *cl.Alloc, in: Tensor) !Tensor {
     return try self.appendNode(
         try self.inner.sigmoid(cl_alloc, self.getClTensor(in.buf)),
@@ -389,6 +404,19 @@ fn backpropInner(self: TracingExecutor, cl_alloc: *cl.Alloc, id: NodeId, downstr
                 gradient_tree,
                 math.Executor.matmulGrad,
             );
+        },
+        .elem_mul => |params| {
+            const b = self.getClTensor(params.b);
+
+            // FIXME: Add cl.Alloc checkpoint
+
+            const a_grads = try self.inner.elemMul(cl_alloc, downstream_gradients, b);
+
+            // FIXME: This only has to happen if it's a gradient we care about
+            // Do not backprop b, only backprop a
+            try self.inner.addAssign(cl_alloc, gradient_tree.get(params.a), a_grads);
+
+            try self.backpropInner(cl_alloc, params.a, a_grads, gradient_tree);
         },
         .conv => |params| {
             try self.backpropTwoParams(
