@@ -45,7 +45,7 @@ fn OpenClLayerGen(comptime Executor: type) type {
 
         fn reshape(_: Self, alloc: std.mem.Allocator, dims: []const u32) !nn.Layer(Executor) {
             const layer = try alloc.create(nn.Reshape(Executor));
-            layer.* = try nn.Reshape(Executor).init(dims);
+            layer.* = try nn.Reshape(Executor).init(alloc, dims);
             return layer.layer();
         }
 
@@ -522,7 +522,19 @@ fn generateTrainingInput(cl_alloc: *cl.Alloc, barcode_gen: *BarcodeGen, rand_par
     };
 }
 
-fn trainThread(channels: *SharedChannels, background_dir: []const u8) !void {
+const InitializerResolver = struct {
+    he: nn.Initializer(math.TracingExecutor),
+    zero: nn.Initializer(math.TracingExecutor),
+
+    fn resolve(self: InitializerResolver, config_type: nn.Config.Initializer) nn.Initializer(math.TracingExecutor) {
+        switch (config_type) {
+            .he => return self.he,
+            .zero => return self.zero,
+        }
+    }
+};
+
+fn trainThread(channels: *SharedChannels, background_dir: []const u8, network_config: []const u8) !void {
     const cl_alloc_buf = try std.heap.page_allocator.alloc(u8, 1 * 1024 * 1024);
     defer std.heap.page_allocator.free(cl_alloc_buf);
 
@@ -559,50 +571,37 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8) !void {
         .executor = &tracing_executor,
     };
 
-    const layers: []const nn.Layer(math.TracingExecutor) = &.{
-        try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 1, 4),
-        layer_gen.relu(),
-        try layer_gen.maxpoolLayer(2),
+    const initializers = InitializerResolver {
+        .he = he_initializer.initializer(),
+        .zero = zero_initializer.initializer(),
+    };
 
-        try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 4, 8),
-        layer_gen.relu(),
-        try layer_gen.conv(cl_alloc.heap(), he_initializer, 1, 1, 8, 16),
-        layer_gen.relu(),
-        try layer_gen.maxpoolLayer(2),
+    const layers = blk: {
+        const scratch = cl_alloc.buf_alloc.backLinear();
 
-        try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 16, 32),
-        layer_gen.relu(),
+        const cp = scratch.checkpoint();
+        defer scratch.restore(cp);
 
-        try layer_gen.conv(cl_alloc.heap(), he_initializer, 1, 1, 32, 32),
-        layer_gen.relu(),
-        try layer_gen.maxpoolLayer(2),
+        try nn.Config.printExample();
 
-        try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 32, 64),
-        layer_gen.relu(),
+        const config_parsed = try nn.Config.parse(scratch.allocator(), network_config);
+        std.debug.print("{any}\n", .{config_parsed});
+        const layers: []nn.Layer(math.TracingExecutor) = try cl_alloc.heap().alloc(nn.Layer(math.TracingExecutor), config_parsed.layers.len);
+        for (config_parsed.layers, layers) |layer_def, *layer| {
 
-        try layer_gen.conv(cl_alloc.heap(), he_initializer, 1, 1, 64, 64),
-        layer_gen.relu(),
-        try layer_gen.maxpoolLayer(2),
+            layer.* = switch(layer_def) {
+                // FIXME: Can we splat the tuple?
+                .conv => |params|
+                    try layer_gen.conv(cl_alloc.heap(), initializers.resolve(params[0]), params[1], params[2], params[3], params[4]),
+                .relu => layer_gen.relu(),
+                .maxpool => |params| try layer_gen.maxpoolLayer(params),
 
-        try layer_gen.conv(cl_alloc.heap(), he_initializer, 3, 3, 64, 128),
-        layer_gen.relu(),
-        try layer_gen.conv(cl_alloc.heap(), he_initializer, 1, 1, 128, 128),
-        layer_gen.relu(),
+                .reshape => |params| try layer_gen.reshape(cl_alloc.heap(), params),
+                .fully_connected => |params| try layer_gen.fullyConnected(cl_alloc.heap(), initializers.resolve(params[0]), initializers.resolve(params[1]), params[2], params[3]),
+            };
+        }
 
-        try layer_gen.reshape(cl_alloc.heap(), &.{ 16 * 16 * 128, train_num_images }),
-
-        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 16 * 16 * 128, 512),
-        layer_gen.relu(),
-
-        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 512, 512),
-        layer_gen.relu(),
-
-        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 512, 256),
-        layer_gen.relu(),
-
-        try layer_gen.fullyConnected(cl_alloc.heap(), he_initializer, zero_initializer, 256, 6),
-
-        try layer_gen.reshape(cl_alloc.heap(), &.{ 6, train_num_images }),
+        break :blk layers;
     };
 
     var barcode_gen = try BarcodeGen.init(
@@ -744,9 +743,11 @@ const TrainingReqDoubleBuffer = struct {
 
 const Args = struct {
     background_dir: []const u8,
+    network_config: []const u8,
 
     const Switch = enum {
         @"--background-dir",
+        @"--network-config",
     };
 
     fn parse(alloc: std.mem.Allocator) !Args {
@@ -755,6 +756,7 @@ const Args = struct {
         const process_name = it.next() orelse "sphmelly";
 
         var background_dir: ?[]const u8 = null;
+        var network_config: ?[]const u8 = null;
 
         while (it.next()) |arg| {
             const s = std.meta.stringToEnum(Switch, arg) orelse {
@@ -767,12 +769,20 @@ const Args = struct {
                     std.log.err("Missing background dir arg", .{});
                     help(process_name);
                 },
+                .@"--network-config" => network_config = it.next() orelse {
+                    std.log.err("Missing network config arg", .{});
+                    help(process_name);
+                },
             }
         }
 
         return .{
             .background_dir = background_dir orelse {
                 std.log.err("background dir not provided", .{});
+                help(process_name);
+            },
+            .network_config = network_config orelse {
+                std.log.err("network config not provided", .{});
                 help(process_name);
             },
         };
@@ -792,6 +802,7 @@ const Args = struct {
         std.process.exit(1);
     }
 };
+
 pub fn main() !void {
     var allocators: AppAllocators = undefined;
     try allocators.initPinned(30 * 1024 * 1024);
@@ -803,7 +814,7 @@ pub fn main() !void {
 
     var comms = SharedChannels{};
 
-    const train_thread = try std.Thread.spawn(.{}, trainThread, .{ &comms, args.background_dir });
+    const train_thread = try std.Thread.spawn(.{}, trainThread, .{ &comms, args.background_dir, args.network_config });
     defer blk: {
         comms.gui_to_train.send(.shutdown) catch break :blk;
         train_thread.join();

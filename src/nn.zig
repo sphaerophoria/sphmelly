@@ -2,6 +2,7 @@ const std = @import("std");
 const sphtud = @import("sphtud");
 const cl = @import("cl.zig");
 const math = @import("math.zig");
+pub const Config = @import("nn/Config.zig");
 
 fn isTracing(comptime T: type) bool {
     switch (T) {
@@ -53,12 +54,32 @@ pub fn Layer(comptime Executor: type) type {
     };
 }
 
+pub fn Initializer(comptime Executor: type) type {
+    return struct {
+        generate_fn: *const fn(ctx: ?*anyopaque, cl_alloc: *cl.Alloc, fan_in: usize, dims: []const u32) anyerror!Executor.Tensor,
+        ctx: ?*anyopaque,
+
+        pub fn generate(self: @This(), cl_alloc: *cl.Alloc, fan_in: usize, dims: []const u32) !Executor.Tensor {
+            return self.generate_fn(self.ctx, cl_alloc, fan_in, dims);
+        }
+    };
+
+}
+
 pub fn HeInitializer(comptime Executor: type) type {
     return struct {
         executor: *Executor,
         rand_source: *math.RandSource,
 
-        pub fn generate(self: @This(), cl_alloc: *cl.Alloc, fan_in: usize, dims: anytype) !Executor.Tensor {
+        pub fn initializer(self: *const @This()) Initializer(Executor) {
+            return .{
+                .generate_fn = generate,
+                .ctx = @constCast(self),
+            };
+        }
+
+        fn generate(ctx: ?*anyopaque, cl_alloc: *cl.Alloc, fan_in: usize, dims: []const u32) !Executor.Tensor {
+            const self: *const @This() = @ptrCast(@alignCast(ctx));
             const stddev = std.math.sqrt(2 / @as(f32, @floatFromInt(fan_in)));
             return self.executor.randGaussian(cl_alloc, dims, stddev, self.rand_source);
         }
@@ -69,7 +90,16 @@ pub fn ZeroInitializer(comptime Executor: type) type {
     return struct {
         executor: *Executor,
 
-        pub fn generate(self: @This(), cl_alloc: *cl.Alloc, _: usize, dims: anytype) !Executor.Tensor {
+        pub fn initializer(self: *const @This()) Initializer(Executor) {
+            return .{
+                .generate_fn = generate,
+                .ctx = @constCast(self),
+            };
+        }
+
+
+        pub fn generate(ctx: ?*anyopaque, cl_alloc: *cl.Alloc, _: usize, dims: []const u32) !Executor.Tensor {
+            const self: *const @This() = @ptrCast(@alignCast(ctx));
             return try self.executor.createTensorFilled(cl_alloc, dims, 0.0);
         }
     };
@@ -83,7 +113,7 @@ pub fn FullyConnected(comptime Executor: type) type {
 
         const Self = @This();
 
-        pub fn init(cl_alloc: *cl.Alloc, weights_initializer: anytype, bias_initializer: anytype, inputs: u32, outputs: u32) !Self {
+        pub fn init(cl_alloc: *cl.Alloc, weights_initializer: Initializer(Executor), bias_initializer: Initializer(Executor), inputs: u32, outputs: u32) !Self {
             const weights = try weights_initializer.generate(cl_alloc, inputs, &.{ inputs, outputs });
             const biases = try bias_initializer.generate(cl_alloc, inputs, &.{ 1, outputs });
 
@@ -289,9 +319,9 @@ pub fn Reshape(comptime Executor: type) type {
 
         const Self = @This();
 
-        pub fn init(shape: []const u32) !Self {
+        pub fn init(alloc: std.mem.Allocator, shape: []const u32) !Self {
             return .{
-                .shape = shape,
+                .shape = try alloc.dupe(u32, shape),
             };
         }
 
@@ -311,7 +341,15 @@ pub fn Reshape(comptime Executor: type) type {
 
         fn execute(ctx: ?*anyopaque, cl_alloc: *cl.Alloc, executor: *Executor, input: Executor.Tensor) !Executor.Tensor {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            return executor.reshape(cl_alloc, input, self.shape);
+
+            const n = input.dims.get(input.dims.len() - 1);
+            var tmp_dims_buf: [10]u32 = undefined;
+            for (self.shape, tmp_dims_buf[0..self.shape.len]) |in, *out| {
+                out.* = in;
+            }
+
+            tmp_dims_buf[self.shape.len] = n;
+            return executor.reshape(cl_alloc, input, tmp_dims_buf[0..self.shape.len + 1]);
         }
     };
 }
