@@ -544,7 +544,7 @@ const InitializerResolver = struct {
     }
 };
 
-fn trainThread(channels: *SharedChannels, background_dir: []const u8, network_config: []const u8) !void {
+fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Config) !void {
     const cl_alloc_buf = try std.heap.page_allocator.alloc(u8, 1 * 1024 * 1024);
     defer std.heap.page_allocator.free(cl_alloc_buf);
 
@@ -581,7 +581,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, network_co
         .executor = &tracing_executor,
     };
 
-    const initializers = InitializerResolver {
+    const initializers = InitializerResolver{
         .he = he_initializer.initializer(),
         .zero = zero_initializer.initializer(),
     };
@@ -589,36 +589,23 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, network_co
     var barcode_size: u32 = 0;
     var train_num_images: u32 = 0;
     var default_lr: f32 = 0;
-    const layers = blk: {
-        const scratch = cl_alloc.buf_alloc.backLinear();
 
-        const cp = scratch.checkpoint();
-        defer scratch.restore(cp);
+    barcode_size = config.img_size;
+    train_num_images = config.batch_size;
+    std.debug.print("{any}\n", .{config});
+    const layers: []nn.Layer(math.TracingExecutor) = try cl_alloc.heap().alloc(nn.Layer(math.TracingExecutor), config.network.layers.len);
+    default_lr = config.network.lr;
+    for (config.network.layers, layers) |layer_def, *layer| {
+        layer.* = switch (layer_def) {
+            // FIXME: Can we splat the tuple?
+            .conv => |params| try layer_gen.conv(cl_alloc.heap(), initializers.resolve(params[0]), params[1], params[2], params[3], params[4]),
+            .relu => layer_gen.relu(),
+            .maxpool => |params| try layer_gen.maxpoolLayer(params),
 
-        try nn.Config.printExample();
-
-        const config_parsed = try Config.parse(scratch.allocator(), network_config);
-        barcode_size = config_parsed.img_size;
-        train_num_images = config_parsed.batch_size;
-        std.debug.print("{any}\n", .{config_parsed});
-        const layers: []nn.Layer(math.TracingExecutor) = try cl_alloc.heap().alloc(nn.Layer(math.TracingExecutor), config_parsed.network.layers.len);
-        default_lr = config_parsed.network.lr;
-        for (config_parsed.network.layers, layers) |layer_def, *layer| {
-
-            layer.* = switch(layer_def) {
-                // FIXME: Can we splat the tuple?
-                .conv => |params|
-                    try layer_gen.conv(cl_alloc.heap(), initializers.resolve(params[0]), params[1], params[2], params[3], params[4]),
-                .relu => layer_gen.relu(),
-                .maxpool => |params| try layer_gen.maxpoolLayer(params),
-
-                .reshape => |params| try layer_gen.reshape(cl_alloc.heap(), params),
-                .fully_connected => |params| try layer_gen.fullyConnected(cl_alloc.heap(), initializers.resolve(params[0]), initializers.resolve(params[1]), params[2], params[3]),
-            };
-        }
-
-        break :blk layers;
-    };
+            .reshape => |params| try layer_gen.reshape(cl_alloc.heap(), params),
+            .fully_connected => |params| try layer_gen.fullyConnected(cl_alloc.heap(), initializers.resolve(params[0]), initializers.resolve(params[1]), params[2], params[3]),
+        };
+    }
 
     var barcode_gen = try BarcodeGen.init(
         // Probably a bit of a violation of separation, but we know that
@@ -827,19 +814,14 @@ pub fn main() !void {
 
     const args = try Args.parse(allocators.root.arena());
 
+    const config = try Config.parse(allocators.root.arena(), args.network_config);
+
     var ui: train_ui.Gui = undefined;
-    {
-
-        const cp = allocators.scratch.checkpoint();
-        defer allocators.scratch.restore(cp);
-
-        const config_parsed = try Config.parse(allocators.scratch.allocator(), args.network_config);
-        try ui.initPinned(&allocators, config_parsed.network.lr, config_parsed.batch_size);
-    }
+    try ui.initPinned(&allocators, config.network.lr, config.batch_size);
 
     var comms = SharedChannels{};
 
-    const train_thread = try std.Thread.spawn(.{}, trainThread, .{ &comms, args.background_dir, args.network_config });
+    const train_thread = try std.Thread.spawn(.{}, trainThread, .{ &comms, args.background_dir, config });
     defer blk: {
         comms.gui_to_train.send(.shutdown) catch break :blk;
         train_thread.join();

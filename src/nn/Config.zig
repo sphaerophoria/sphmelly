@@ -1,5 +1,6 @@
 const std = @import("std");
 
+lr: f32,
 layers: []const LayerDef,
 
 const Config = @This();
@@ -30,6 +31,7 @@ pub const LayerDef = union(enum) {
 
 pub fn printExample() !void {
     const example = Config{
+        .lr = 0.001,
         .layers = &.{
             .{
                 .conv = .{ .he, 1, 2, 3, 4 },
@@ -44,12 +46,4 @@ pub fn printExample() !void {
     const stdout = std.io.getStdOut();
     try std.json.stringify(example, .{ .whitespace = .indent_2 }, stdout.writer());
     try stdout.writeAll("\n");
-}
-
-pub fn parse(leaky: std.mem.Allocator, path: []const u8) !Config {
-    const f = try std.fs.cwd().openFile(path, .{});
-    defer f.close();
-
-    var json_reader = std.json.reader(leaky, f.reader());
-    return std.json.parseFromTokenSourceLeaky(Config, leaky, &json_reader, .{});
 }

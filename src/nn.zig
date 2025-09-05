@@ -56,14 +56,13 @@ pub fn Layer(comptime Executor: type) type {
 
 pub fn Initializer(comptime Executor: type) type {
     return struct {
-        generate_fn: *const fn(ctx: ?*anyopaque, cl_alloc: *cl.Alloc, fan_in: usize, dims: []const u32) anyerror!Executor.Tensor,
+        generate_fn: *const fn (ctx: ?*anyopaque, cl_alloc: *cl.Alloc, fan_in: usize, dims: []const u32) anyerror!Executor.Tensor,
         ctx: ?*anyopaque,
 
         pub fn generate(self: @This(), cl_alloc: *cl.Alloc, fan_in: usize, dims: []const u32) !Executor.Tensor {
             return self.generate_fn(self.ctx, cl_alloc, fan_in, dims);
         }
     };
-
 }
 
 pub fn HeInitializer(comptime Executor: type) type {
@@ -96,7 +95,6 @@ pub fn ZeroInitializer(comptime Executor: type) type {
                 .ctx = @constCast(self),
             };
         }
-
 
         pub fn generate(ctx: ?*anyopaque, cl_alloc: *cl.Alloc, _: usize, dims: []const u32) !Executor.Tensor {
             const self: *const @This() = @ptrCast(@alignCast(ctx));
@@ -349,7 +347,7 @@ pub fn Reshape(comptime Executor: type) type {
             }
 
             tmp_dims_buf[self.shape.len] = n;
-            return executor.reshape(cl_alloc, input, tmp_dims_buf[0..self.shape.len + 1]);
+            return executor.reshape(cl_alloc, input, tmp_dims_buf[0 .. self.shape.len + 1]);
         }
     };
 }
