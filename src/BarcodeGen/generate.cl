@@ -337,7 +337,7 @@ bool multisample_barcode(
             float2 offs = {x_offs, y_offs};
 
             int barcode_idx = pixel_offs_to_barcode_idx(&sampler, offs);
-            if (barcode_idx < 0 || barcode_idx > BARCODE_NUM_MODULES) {
+            if (barcode_idx < 0 || barcode_idx >= BARCODE_NUM_MODULES) {
                 return false;
             }
             sum += lerp(dark_color, light_color, sample_buf[barcode_idx]);
