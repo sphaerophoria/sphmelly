@@ -3,8 +3,8 @@
 import json
 
 batch_size = 64;
-img_size = 256
-conv_end_size = img_size / 16 * img_size / 16 * 128;
+img_size = 256 * 0.75
+conv_end_size = img_size / 16 * img_size / 16 * 4;
 config = {
     "batch_size": batch_size,
     "img_size": img_size,
@@ -15,38 +15,36 @@ config = {
             { "relu": {} },
             { "maxpool": 2 },
 
-            { "conv": ["he", 3, 3, 4, 8] },
+            { "conv": ["he", 3, 3, 4, 4] },
             { "relu": {} },
-            { "conv": ["he", 1, 1, 8, 16] },
-            { "relu": {} },
-            { "maxpool": 2 },
-
-            { "conv": ["he", 3, 3, 16, 32] },
-            { "relu": {} },
-            { "conv": ["he", 1, 1, 32, 32] },
+            { "conv": ["he", 1, 1, 4, 4] },
             { "relu": {} },
             { "maxpool": 2 },
 
-            { "conv": ["he", 3, 3, 32, 64] },
+            { "conv": ["he", 3, 3, 4, 4] },
             { "relu": {} },
-            { "conv": ["he", 1, 1, 64, 64] },
+            { "conv": ["he", 1, 1, 4, 4] },
             { "relu": {} },
             { "maxpool": 2 },
 
-            { "conv": ["he", 3, 3, 64, 128] },
+            { "conv": ["he", 3, 3, 4, 4] },
             { "relu": {} },
-            { "conv": ["he", 1, 1, 128, 128] },
+            { "conv": ["he", 1, 1, 4, 4] },
+            { "relu": {} },
+            { "maxpool": 2 },
+
+            { "conv": ["he", 3, 3, 4, 4] },
+            { "relu": {} },
+            { "conv": ["he", 1, 1, 4, 4] },
             { "relu": {} },
 
             { "reshape": [ conv_end_size ] },
 
-            { "fully_connected": [ "he", "zero", conv_end_size, 512 ] },
+            { "fully_connected": [ "he", "zero", conv_end_size, 128 ] },
             { "relu": {} },
-            { "fully_connected": [ "he", "zero", 512, 512 ] },
+            { "fully_connected": [ "he", "zero", 128, 128 ] },
             { "relu": {} },
-            { "fully_connected": [ "he", "zero", 512, 256 ] },
-            { "relu": {} },
-            { "fully_connected": [ "he", "zero", 256, 6 ]  }
+            { "fully_connected": [ "he", "zero", 128, 6 ]  }
         ]
     }
 }
