@@ -466,6 +466,8 @@ fn generateTrainingInput(cl_alloc: *cl.Alloc, barcode_gen: *BarcodeGen, rand_par
 const Config = struct {
     batch_size: u32,
     img_size: u32,
+    log_freq: u32,
+    val_freq: u32,
     network: nn.Config,
 
     pub fn parse(leaky: std.mem.Allocator, path: []const u8) !Config {
@@ -473,11 +475,17 @@ const Config = struct {
         defer f.close();
 
         var json_reader = std.json.reader(leaky, f.reader());
-        return try std.json.parseFromTokenSourceLeaky(Config, leaky, &json_reader, .{});
+        const ret = try std.json.parseFromTokenSourceLeaky(Config, leaky, &json_reader, .{});
+
+        if (ret.val_freq % ret.log_freq != 0) {
+            return error.InvalidValFreq;
+        }
+
+        return ret;
     }
 };
 
-fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Config) !void {
+fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Config, out_dir: std.fs.Dir) !void {
     const cl_alloc_buf = try std.heap.page_allocator.alloc(u8, 1 * 1024 * 1024);
     defer std.heap.page_allocator.free(cl_alloc_buf);
 
@@ -550,6 +558,29 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
         unpaused,
     } = .unpaused;
 
+    const val_size = 200;
+    const validation_set = try generateTrainingInput(
+        &cl_alloc,
+        &barcode_gen,
+        rand_params,
+        math_executor,
+        &rand_source,
+        &notifier,
+        val_size,
+        config.img_size,
+    );
+
+    var iter: usize = 0;
+    const start_time = try std.time.Instant.now();
+
+    const log_file = try out_dir.createFile("log.csv", .{});
+    defer log_file.close();
+
+    var buf_writer = std.io.bufferedWriter(log_file.writer());
+    defer buf_writer.flush() catch {};
+
+    const log_writer = buf_writer.writer();
+
     const math_checkpoint = tracing_executor.checkpoint();
     const cl_alloc_checkpoint = cl_alloc.checkpoint();
 
@@ -587,6 +618,68 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                         continue;
                     },
                     .ok => {},
+                }
+
+                iter += 1;
+                if (iter % config.log_freq == 0) {
+                    const wall_time = (try std.time.Instant.now()).since(start_time);
+
+                    try log_writer.print("step,{d},{d},{d}\n", .{ iter, wall_time, iter * config.batch_size });
+                    const loss_cpu = try tracing_executor.toCpu(cl_alloc.heap(), &cl_alloc, loss);
+                    var total_losses: [6]f32 = @splat(0);
+                    for (0..loss_cpu.len / 6) |i| {
+                        for (0..6) |j| {
+                            total_losses[j] += loss_cpu[i * 6 + j];
+                        }
+                    }
+
+                    const labels: []const []const u8 = &.{ "dx", "dy", "dw", "dh", "drx", "dry" };
+                    for (total_losses, labels) |total_loss, label| {
+                        try log_writer.print("{s} loss,{d}\n", .{ label, total_loss });
+                    }
+                    var total_loss: f32 = 0;
+                    for (total_losses) |v| {
+                        total_loss += v;
+                    }
+                    try log_writer.print("total loss,{d}\n", .{total_loss});
+
+                    if (iter % config.val_freq == 0) {
+                        const val_results = try nn.runLayers(&cl_alloc, validation_set.input, layers, &tracing_executor);
+                        const val_err = try math_executor.sub(&cl_alloc, tracing_executor.getClTensor(val_results[val_results.len - 1].buf), validation_set.expected);
+
+                        const val_err_cpu = try math_executor.toCpu(cl_alloc.heap(), &cl_alloc, val_err);
+                        var total_val_mse: f32 = 0;
+                        for (val_err_cpu) |l| {
+                            total_val_mse += l * l;
+                        }
+
+                        std.debug.assert(val_err.dims.get(0) == 6);
+                        std.debug.assert(val_err.dims.len() == 2);
+                        var totals: [6]f32 = @splat(0);
+                        var sum_squares: [6]f32 = @splat(0);
+                        for (0..val_err_cpu.len / 6) |i| {
+                            for (0..6) |j| {
+                                const val = val_err_cpu[i * 6 + j];
+                                totals[j] += @abs(val);
+                                sum_squares[j] += val * val;
+                            }
+                        }
+                        for (&totals) |*t| {
+                            t.* /= val_size;
+                        }
+                        for (&sum_squares) |*t| {
+                            t.* /= val_size;
+                        }
+
+                        try log_writer.print("val mse,{d}\n", .{total_val_mse / val_size});
+
+                        for (labels, totals, sum_squares) |label, average, mse| {
+                            try log_writer.print("avg {s},{d}\n", .{ label, average });
+                            try log_writer.print("mse {s},{d}\n", .{ label, mse });
+                        }
+                    }
+
+                    try buf_writer.flush();
                 }
 
                 try cl_executor.finish();
@@ -645,10 +738,12 @@ const TrainingReqDoubleBuffer = struct {
 const Args = struct {
     background_dir: []const u8,
     config: []const u8,
+    out_dir: []const u8,
 
     const Switch = enum {
         @"--background-dir",
         @"--config",
+        @"--out-dir",
     };
 
     fn parse(alloc: std.mem.Allocator) !Args {
@@ -658,6 +753,7 @@ const Args = struct {
 
         var background_dir: ?[]const u8 = null;
         var config: ?[]const u8 = null;
+        var out_dir: ?[]const u8 = null;
 
         while (it.next()) |arg| {
             const s = std.meta.stringToEnum(Switch, arg) orelse {
@@ -674,6 +770,10 @@ const Args = struct {
                     std.log.err("Missing config arg", .{});
                     help(process_name);
                 },
+                .@"--out-dir" => out_dir = it.next() orelse {
+                    std.log.err("Missing out dir arg", .{});
+                    help(process_name);
+                },
             }
         }
 
@@ -684,6 +784,10 @@ const Args = struct {
             },
             .config = config orelse {
                 std.log.err("config not provided", .{});
+                help(process_name);
+            },
+            .out_dir = out_dir orelse {
+                std.log.err("out dir not provided", .{});
                 help(process_name);
             },
         };
@@ -698,6 +802,7 @@ const Args = struct {
             \\Required args:
             \\--background-dir: Where to load image backgrounds from
             \\--config: Training configuration path
+            \\--out-dir: Where to save training output
             \\
         , .{process_name}) catch {};
 
@@ -711,14 +816,26 @@ pub fn main() !void {
 
     const args = try Args.parse(allocators.root.arena());
 
+    try std.fs.cwd().makeDir(args.out_dir);
+
+    var out_dir = try std.fs.cwd().openDir(args.out_dir, .{});
+    defer out_dir.close();
+
     const config = try Config.parse(allocators.root.arena(), args.config);
+
+    {
+        const config_out = try out_dir.createFile("config.json", .{});
+        defer config_out.close();
+
+        try std.json.stringify(config, .{ .whitespace = .indent_2 }, config_out.writer());
+    }
 
     var ui: train_ui.Gui = undefined;
     try ui.initPinned(&allocators, config.network.lr, config.batch_size);
 
     var comms = SharedChannels{};
 
-    const train_thread = try std.Thread.spawn(.{}, trainThread, .{ &comms, args.background_dir, config });
+    const train_thread = try std.Thread.spawn(.{}, trainThread, .{ &comms, args.background_dir, config, out_dir });
     defer blk: {
         comms.gui_to_train.send(.shutdown) catch break :blk;
         train_thread.join();

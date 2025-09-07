@@ -187,7 +187,7 @@ pub fn ImageView(comptime Action: type) type {
             self.size = available_size;
         }
 
-        fn setInputState(ctx: ?*anyopaque, widget_bounds: gui.PixelBBox, input_bounds: gui.PixelBBox, input_state: gui.InputState) gui.InputResponse(Action) {
+        fn setInputState(ctx: ?*anyopaque, widget_bounds: gui.PixelBBox, input_bounds: gui.PixelBBox, input_state: *gui.InputState) gui.InputResponse(Action) {
             const self: *Self = @ptrCast(@alignCast(ctx));
 
             // image is scaled so it's width fits the widget width
@@ -200,7 +200,7 @@ pub fn ImageView(comptime Action: type) type {
             return self.handleRightClick(widget_bounds, input_bounds, input_state, widget_to_pixel_dist);
         }
 
-        fn applyDrag(self: *Self, input_bounds: gui.PixelBBox, input_state: gui.InputState, widget_to_pixel_dist: f32) void {
+        fn applyDrag(self: *Self, input_bounds: gui.PixelBBox, input_state: *gui.InputState, widget_to_pixel_dist: f32) void {
             switch (self.drag_state) {
                 .dragging => |state| blk: {
                     if (input_state.mouse_released) {
@@ -226,7 +226,7 @@ pub fn ImageView(comptime Action: type) type {
             }
         }
 
-        fn applyZoom(self: *Self, input_state: gui.InputState) void {
+        fn applyZoom(self: *Self, input_state: *gui.InputState) void {
             // Note that amount is in range [-N,N]
             // If we want the zoom adjustment to feel consistent, we need the
             // change from 4-8x to feel the same as the change from 1-2x
@@ -244,7 +244,7 @@ pub fn ImageView(comptime Action: type) type {
             self.scale *= std.math.pow(f32, 1.1, input_state.frame_scroll);
         }
 
-        fn applyReset(self: *Self, input_state: gui.InputState) void {
+        fn applyReset(self: *Self, input_state: *gui.InputState) void {
             if (input_state.key_tracker.isKeyDown(.{ .ascii = 'r' })) {
                 self.scale = 1.0;
                 self.img_offset = .{
@@ -254,7 +254,7 @@ pub fn ImageView(comptime Action: type) type {
             }
         }
 
-        fn handleRightClick(self: *Self, widget_bounds: gui.PixelBBox, input_bounds: gui.PixelBBox, input_state: gui.InputState, widget_to_pixel_dist: f32) gui.InputResponse(Action) {
+        fn handleRightClick(self: *Self, widget_bounds: gui.PixelBBox, input_bounds: gui.PixelBBox, input_state: *gui.InputState, widget_to_pixel_dist: f32) gui.InputResponse(Action) {
             var response: gui.InputResponse(Action) = .{};
 
             if (!input_state.mouse_right_pressed or !input_bounds.containsMousePos(input_state.mouse_pos)) {

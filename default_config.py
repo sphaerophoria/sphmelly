@@ -8,6 +8,8 @@ conv_end_size = img_size / 16 * img_size / 16 * 4;
 config = {
     "batch_size": batch_size,
     "img_size": img_size,
+    "log_freq": 10,
+    "val_freq": 100,
     "network": {
         "lr": 0.004,
         "layers": [

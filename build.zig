@@ -42,6 +42,14 @@ pub fn build(b: *std.Build) void {
     });
     addCommonDependencies(b, exe, sphtud_mod);
 
+    const train_output_vis = b.addExecutable(.{
+        .name = "train_output_vis",
+        .root_source_file = b.path("src/train_output_vis.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    addCommonDependencies(b, train_output_vis, sphtud_mod);
+
     const imagegen = b.addExecutable(.{
         .name = "imagegen",
         .root_source_file = b.path("src/imagegen.zig"),
@@ -70,4 +78,5 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(test_exe);
     b.installArtifact(exe);
     b.installArtifact(imagegen);
+    b.installArtifact(train_output_vis);
 }

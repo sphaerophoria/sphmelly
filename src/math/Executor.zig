@@ -35,6 +35,7 @@ squared_err_grad_kernel: cl.Executor.Kernel,
 bce_with_logits_kernel: cl.Executor.Kernel,
 bce_with_logits_grad_kernel: cl.Executor.Kernel,
 add_assign_kernel: cl.Executor.Kernel,
+sub_kernel: cl.Executor.Kernel,
 mul_scalar_kernel: cl.Executor.Kernel,
 elem_mul_kernel: cl.Executor.Kernel,
 rand_kernel: cl.Executor.Kernel,
@@ -55,6 +56,7 @@ executor: *cl.Executor,
 pub fn init(cl_alloc: *cl.Alloc, executor: *cl.Executor) !Executor {
     const sum_program = try executor.createProgram(cl_alloc, sum_program_content);
     const add_assign_kernel = try sum_program.createKernel(cl_alloc, "add_assign");
+    const sub_kernel = try sum_program.createKernel(cl_alloc, "sub");
 
     const matmul_program = try executor.createProgram(cl_alloc, matmul_program_content);
     const matmul_kernel = try matmul_program.createKernel(cl_alloc, "matmul");
@@ -125,6 +127,7 @@ pub fn init(cl_alloc: *cl.Alloc, executor: *cl.Executor) !Executor {
         .bce_with_logits_kernel = bce_with_logits_kernel,
         .bce_with_logits_grad_kernel = bce_with_logits_grad_kernel,
         .add_assign_kernel = add_assign_kernel,
+        .sub_kernel = sub_kernel,
         .mul_scalar_kernel = mul_scalar_kernel,
         .elem_mul_kernel = elem_mul_kernel,
         .rand_kernel = rand_kernel,
@@ -305,7 +308,29 @@ pub fn gt(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, dim: u32) !Tensor {
     };
 }
 
-pub fn squaredErr(self: *Executor, cl_alloc: *cl.Alloc, a: Tensor, b: Tensor) !Tensor {
+pub fn sub(self: Executor, cl_alloc: *cl.Alloc, a: Tensor, b: Tensor) !Tensor {
+    if (!a.dims.eql(b.dims)) {
+        std.log.err("{any} does not match {any}\n", .{ a.dims, b.dims });
+        return error.InvalidDims;
+    }
+
+    const ret = try self.executor.createBuffer(cl_alloc, .read_write, a.dims.byteSize());
+
+    const n = a.dims.numElems();
+    try self.executor.executeKernelUntracked(cl_alloc, self.sub_kernel, n, &.{
+        .{ .buf = a.buf },
+        .{ .buf = b.buf },
+        .{ .buf = ret },
+        .{ .uint = n },
+    });
+
+    return .{
+        .buf = ret,
+        .dims = try a.dims.clone(cl_alloc.heap()),
+    };
+}
+
+pub fn squaredErr(self: Executor, cl_alloc: *cl.Alloc, a: Tensor, b: Tensor) !Tensor {
     if (!a.dims.eql(b.dims)) {
         std.log.err("{any} does not match {any}\n", .{ a.dims, b.dims });
         return error.InvalidDims;
