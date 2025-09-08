@@ -451,8 +451,8 @@ const TrainingInput = struct {
     expected: math.Executor.Tensor,
 };
 
-fn generateTrainingInput(cl_alloc: *cl.Alloc, barcode_gen: *BarcodeGen, rand_params: BarcodeGen.RandomizationParams, math_executor: math.Executor, rand_source: *math.RandSource, _: *TrainNotifier, train_num_images: u32, barcode_size: u32) !TrainingInput {
-    const bars = try barcode_gen.makeBars(cl_alloc, rand_params, false, train_num_images, rand_source);
+fn generateTrainingInput(cl_alloc: *cl.Alloc, barcode_gen: *BarcodeGen, rand_params: BarcodeGen.RandomizationParams, math_executor: math.Executor, rand_source: *math.RandSource, _: *TrainNotifier, train_num_images: u32, barcode_size: u32, enable_backgrounds: bool) !TrainingInput {
+    const bars = try barcode_gen.makeBars(cl_alloc, rand_params, enable_backgrounds, train_num_images, rand_source);
 
     const batch_cl_4d = try math_executor.reshape(cl_alloc, bars.imgs, &.{ barcode_size, barcode_size, 1, train_num_images });
 
@@ -468,6 +468,7 @@ const Config = struct {
     img_size: u32,
     log_freq: u32,
     val_freq: u32,
+    enable_backgrounds: bool,
     heal_orientations: bool,
     loss_multipliers: []f32,
     network: nn.Config,
@@ -570,6 +571,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
         &notifier,
         val_size,
         config.img_size,
+        config.enable_backgrounds,
     );
 
     var iter: usize = 0;
@@ -602,6 +604,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                     &notifier,
                     config.batch_size,
                     config.img_size,
+                    config.enable_backgrounds,
                 );
 
                 const results = try nn.runLayers(&cl_alloc, train_input.input, layers, &tracing_executor);
