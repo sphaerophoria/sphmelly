@@ -446,18 +446,18 @@ const TrainNotifier = struct {
 };
 
 const TrainingInput = struct {
+    bars: BarcodeGen.Bars,
     input: math.Executor.Tensor,
     expected: math.Executor.Tensor,
 };
 
-fn generateTrainingInput(cl_alloc: *cl.Alloc, barcode_gen: *BarcodeGen, rand_params: BarcodeGen.RandomizationParams, math_executor: math.Executor, rand_source: *math.RandSource, notifier: *TrainNotifier, train_num_images: u32, barcode_size: u32) !TrainingInput {
+fn generateTrainingInput(cl_alloc: *cl.Alloc, barcode_gen: *BarcodeGen, rand_params: BarcodeGen.RandomizationParams, math_executor: math.Executor, rand_source: *math.RandSource, _: *TrainNotifier, train_num_images: u32, barcode_size: u32) !TrainingInput {
     const bars = try barcode_gen.makeBars(cl_alloc, rand_params, false, train_num_images, rand_source);
-
-    try notifier.batchGenerationQueued(bars.imgs, bars.bounding_boxes);
 
     const batch_cl_4d = try math_executor.reshape(cl_alloc, bars.imgs, &.{ barcode_size, barcode_size, 1, train_num_images });
 
     return .{
+        .bars = bars,
         .input = batch_cl_4d,
         .expected = bars.bounding_boxes,
     };
@@ -468,6 +468,7 @@ const Config = struct {
     img_size: u32,
     log_freq: u32,
     val_freq: u32,
+    heal_orientations: bool,
     network: nn.Config,
 
     pub fn parse(leaky: std.mem.Allocator, path: []const u8) !Config {
@@ -606,6 +607,10 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                 try notifier.notifyLayerOutputs(results);
                 try notifier.predictionsQueued(results[results.len - 1]);
 
+                if (config.heal_orientations) {
+                    try barcode_gen.healOrientations(&cl_alloc, train_input.expected, tracing_executor.getClTensor(results[results.len - 1].buf));
+                }
+                try notifier.batchGenerationQueued(train_input.bars.imgs, train_input.bars.bounding_boxes);
                 const traced_expected = try tracing_executor.appendNode(train_input.expected, .init);
                 const even_loss = try tracing_executor.squaredErr(&cl_alloc, results[results.len - 1], traced_expected);
                 const loss_multipliers = try math_executor.createTensorUntracked(&cl_alloc, &.{ 1, 1, 1, 0.6, 0.05, 0.05 }, &.{6});
@@ -645,6 +650,11 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
 
                     if (iter % config.val_freq == 0) {
                         const val_results = try nn.runLayers(&cl_alloc, validation_set.input, layers, &tracing_executor);
+
+                        if (config.heal_orientations) {
+                            try barcode_gen.healOrientations(&cl_alloc, validation_set.expected, tracing_executor.getClTensor(val_results[val_results.len - 1].buf));
+                        }
+
                         const val_err = try math_executor.sub(&cl_alloc, tracing_executor.getClTensor(val_results[val_results.len - 1].buf), validation_set.expected);
 
                         const val_err_cpu = try math_executor.toCpu(cl_alloc.heap(), &cl_alloc, val_err);

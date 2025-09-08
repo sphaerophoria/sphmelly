@@ -10,6 +10,7 @@ config = {
     "img_size": img_size,
     "log_freq": 10,
     "val_freq": 100,
+    "heal_orientations": False,
     "network": {
         "lr": 0.004,
         "layers": [

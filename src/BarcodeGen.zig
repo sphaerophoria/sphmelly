@@ -11,6 +11,7 @@ module_gen_kernel: cl.Executor.Kernel,
 barcode_gen_kernel: cl.Executor.Kernel,
 sample_params_kernel: cl.Executor.Kernel,
 generate_blur_kernels_kernel: cl.Executor.Kernel,
+heal_orientations_kernel: cl.Executor.Kernel,
 backgrounds: math.Executor.Tensor,
 background_size: u32,
 
@@ -37,6 +38,7 @@ pub fn init(scratch: sphtud.alloc.LinearAllocator, cl_alloc: *cl.Alloc, math_exe
     const module_gen_kernel = try program.createKernel(cl_alloc, "generate_module_patterns");
     const sample_params_kernel = try program.createKernel(cl_alloc, "sample_barcode_params");
     const generate_blur_kernels_kernel = try program.createKernel(cl_alloc, "generate_blur_kernels");
+    const heal_orientations_kernel = try program.createKernel(cl_alloc, "heal_orientations");
 
     const backgrounds = try makeBackgroundImgBuf(scratch, cl_alloc, math_executor, background_image_dir, img_width);
 
@@ -46,12 +48,13 @@ pub fn init(scratch: sphtud.alloc.LinearAllocator, cl_alloc: *cl.Alloc, math_exe
         .module_gen_kernel = module_gen_kernel,
         .sample_params_kernel = sample_params_kernel,
         .generate_blur_kernels_kernel = generate_blur_kernels_kernel,
+        .heal_orientations_kernel = heal_orientations_kernel,
         .backgrounds = backgrounds,
         .background_size = img_width,
     };
 }
 
-const Bars = struct {
+pub const Bars = struct {
     imgs: math.Executor.Tensor,
     masks: math.Executor.Tensor,
     bounding_boxes: math.Executor.Tensor,
@@ -74,6 +77,19 @@ pub fn makeBars(self: BarcodeGen, cl_alloc: *cl.Alloc, rand_params: Randomizatio
         .masks = pass1_out.masks,
         .bounding_boxes = instanced.bounding_boxes,
     };
+}
+
+pub fn healOrientations(self: BarcodeGen, cl_alloc: *cl.Alloc, labels: math.Executor.Tensor, predicted: math.Executor.Tensor) !void {
+    if (!predicted.dims.eql(labels.dims)) {
+        return error.InvalidDims;
+    }
+
+    const n = labels.dims.get(labels.dims.len() - 1);
+    try self.math_executor.executor.executeKernelUntracked(cl_alloc, self.heal_orientations_kernel, n, &.{
+        .{ .buf = labels.buf },
+        .{ .buf = predicted.buf },
+        .{ .uint = n },
+    });
 }
 
 fn makeSampleBuf(self: BarcodeGen, cl_alloc: *cl.Alloc, rand_source: *math.RandSource, num_barcodes: u32) !math.Executor.Tensor {

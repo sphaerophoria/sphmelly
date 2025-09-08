@@ -482,3 +482,24 @@ __kernel void generate_blur_kernels(
     // Multiply x/y gaussians, should have same shape, volume will not be 1
     ret[global_id] = norm_x_sample * norm_y_sample * sample_width;
 }
+
+__kernel void heal_orientations(
+        __global float* labels,
+        __global float* predictions,
+        uint n
+) {
+    uint global_id = get_global_id(0);
+    if (global_id >= n) return;
+
+    __global float* thread_label = labels + global_id * 6;
+    __global float* thread_prediction = predictions + global_id * 6;
+
+    float2 label_orientation = {thread_label[4], thread_label[5]};
+    float2 prediction_orientation = {thread_prediction[4], thread_prediction[5]};
+
+    if (dot(label_orientation, prediction_orientation) < 0) {
+        thread_label[4] = -thread_label[4];
+        thread_label[5] = -thread_label[5];
+    }
+
+}
