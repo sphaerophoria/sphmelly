@@ -501,7 +501,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
     };
 
     const initializers = nn.makeInitializers(&tracing_executor, &rand_source);
-    const layers = try nn.modelFromConfig(&cl_alloc, &tracing_executor, initializers, config.network.layers);
+    const layers = try nn.modelFromConfig(&cl_alloc, &tracing_executor, &initializers, config.network.layers);
 
     var barcode_gen = try BarcodeGen.init(
         // Probably a bit of a violation of separation, but we know that

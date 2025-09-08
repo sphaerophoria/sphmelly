@@ -451,7 +451,7 @@ pub fn Initializers(comptime Executor: type) type {
         he: HeInitializer(Executor),
         zero: ZeroInitializer(Executor),
 
-        pub fn resolve(self: @This(), config_type: Config.Initializer) Initializer(math.TracingExecutor) {
+        pub fn resolve(self: *const @This(), config_type: Config.Initializer) Initializer(math.TracingExecutor) {
             switch (config_type) {
                 .he => return self.he.initializer(),
                 .zero => return self.zero.initializer(),
@@ -472,7 +472,7 @@ pub fn makeInitializers(executor: anytype, rand_source: *math.RandSource) Initia
     };
 }
 
-pub fn modelFromConfig(cl_alloc: *cl.Alloc, executor: anytype, initializers: Initializers(@TypeOf(executor.*)), layer_config: []const Config.LayerDef) ![]Layer(@TypeOf(executor.*)) {
+pub fn modelFromConfig(cl_alloc: *cl.Alloc, executor: anytype, initializers: *const Initializers(@TypeOf(executor.*)), layer_config: []const Config.LayerDef) ![]Layer(@TypeOf(executor.*)) {
     const Executor = @TypeOf(executor.*);
     const layers: []Layer(Executor) = try cl_alloc.heap().alloc(Layer(Executor), layer_config.len);
 
