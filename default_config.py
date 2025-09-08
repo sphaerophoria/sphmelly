@@ -6,13 +6,27 @@ batch_size = 64;
 img_size = 256 * 0.75
 conv_end_size = img_size / 16 * img_size / 16 * 4;
 config = {
-    "batch_size": batch_size,
-    "img_size": img_size,
+    "data": {
+        "batch_size": batch_size,
+        "img_size": img_size,
+        "rand_params": {
+            "x_offs_range": [ -50, 50 ],
+            "y_offs_range": [ -50, 50 ],
+            "x_scale_range": [ 0.2, 0.4 ],
+            "aspect_range": [ 0.4, 1.0 ],
+            "min_contrast": 0.2,
+            "x_noise_multiplier_range": [ 0, 0 ],
+            "y_noise_multiplier_range": [ 0, 0 ],
+            "perlin_grid_size_range": [ 10, 100 ],
+            "background_color_range": [ 0.0, 1.0 ],
+            "blur_stddev_range": [ 0.0001, 2.0 ],
+        },
+        "enable_backgrounds": False,
+    },
     "log_freq": 10,
     "val_freq": 100,
     "heal_orientations": False,
     "loss_multipliers": [ 1, 1, 1, 0.6, 0.05, 0.05 ],
-    "enable_backgrounds": False,
     "network": {
         "lr": 0.004,
         "layers": [

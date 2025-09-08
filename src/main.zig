@@ -464,11 +464,14 @@ fn generateTrainingInput(cl_alloc: *cl.Alloc, barcode_gen: *BarcodeGen, rand_par
 }
 
 const Config = struct {
-    batch_size: u32,
-    img_size: u32,
+    data: struct {
+        batch_size: u32,
+        img_size: u32,
+        rand_params: BarcodeGen.RandomizationParams,
+        enable_backgrounds: bool,
+    },
     log_freq: u32,
     val_freq: u32,
-    enable_backgrounds: bool,
     heal_orientations: bool,
     loss_multipliers: []f32,
     network: nn.Config,
@@ -522,23 +525,8 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
         &cl_alloc,
         math_executor,
         background_dir,
-        config.img_size,
+        config.data.img_size,
     );
-    const rand_params = BarcodeGen.RandomizationParams{
-        // FIXME offset range should probably be a ratio of image size, not absolute pixels
-        .x_offs_range = .{ -50, 50 },
-        .y_offs_range = .{ -50, 50 },
-        .x_scale_range = .{ 0.2, 0.4 },
-        .aspect_range = .{ 0.4, 1.0 },
-        .min_contrast = 0.2,
-        .x_noise_multiplier_range = .{ 0, 0 },
-        .y_noise_multiplier_range = .{ 0, 0 },
-        .perlin_grid_size_range = .{ 10, 100 },
-        .background_color_range = .{ 0.0, 1.0 },
-        // FIXME Blur amount is in pixel space, maybe these should be
-        // scaled by resolution of inputs
-        .blur_stddev_range = .{ 0.0001, 2.0 },
-    };
 
     var trainer = nn.Trainer(TrainNotifier){
         .optimizer = try .init(.{
@@ -565,13 +553,13 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
     const validation_set = try generateTrainingInput(
         &cl_alloc,
         &barcode_gen,
-        rand_params,
+        config.data.rand_params,
         math_executor,
         &rand_source,
         &notifier,
         val_size,
-        config.img_size,
-        config.enable_backgrounds,
+        config.data.img_size,
+        config.data.enable_backgrounds,
     );
 
     var iter: usize = 0;
@@ -598,13 +586,13 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                 const train_input = try generateTrainingInput(
                     &cl_alloc,
                     &barcode_gen,
-                    rand_params,
+                    config.data.rand_params,
                     math_executor,
                     &rand_source,
                     &notifier,
-                    config.batch_size,
-                    config.img_size,
-                    config.enable_backgrounds,
+                    config.data.batch_size,
+                    config.data.img_size,
+                    config.data.enable_backgrounds,
                 );
 
                 const results = try nn.runLayers(&cl_alloc, train_input.input, layers, &tracing_executor);
@@ -633,7 +621,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                 if (iter % config.log_freq == 0) {
                     const wall_time = (try std.time.Instant.now()).since(start_time);
 
-                    try log_writer.print("step,{d},{d},{d}\n", .{ iter, wall_time, iter * config.batch_size });
+                    try log_writer.print("step,{d},{d},{d}\n", .{ iter, wall_time, iter * config.data.batch_size });
                     const loss_cpu = try tracing_executor.toCpu(cl_alloc.heap(), &cl_alloc, loss);
                     var total_losses: [6]f32 = @splat(0);
                     for (0..loss_cpu.len / 6) |i| {
@@ -845,7 +833,7 @@ pub fn main() !void {
     }
 
     var ui: train_ui.Gui = undefined;
-    try ui.initPinned(&allocators, config.network.lr, config.batch_size);
+    try ui.initPinned(&allocators, config.network.lr, config.data.batch_size);
 
     var comms = SharedChannels{};
 
