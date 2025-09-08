@@ -11,6 +11,7 @@ config = {
     "log_freq": 10,
     "val_freq": 100,
     "heal_orientations": False,
+    "loss_multipliers": [ 1, 1, 1, 0.6, 0.05, 0.05 ],
     "network": {
         "lr": 0.004,
         "layers": [

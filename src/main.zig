@@ -469,6 +469,7 @@ const Config = struct {
     log_freq: u32,
     val_freq: u32,
     heal_orientations: bool,
+    loss_multipliers: []f32,
     network: nn.Config,
 
     pub fn parse(leaky: std.mem.Allocator, path: []const u8) !Config {
@@ -613,7 +614,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                 try notifier.batchGenerationQueued(train_input.bars.imgs, train_input.bars.bounding_boxes);
                 const traced_expected = try tracing_executor.appendNode(train_input.expected, .init);
                 const even_loss = try tracing_executor.squaredErr(&cl_alloc, results[results.len - 1], traced_expected);
-                const loss_multipliers = try math_executor.createTensorUntracked(&cl_alloc, &.{ 1, 1, 1, 0.6, 0.05, 0.05 }, &.{6});
+                const loss_multipliers = try math_executor.createTensorUntracked(&cl_alloc, config.loss_multipliers, &.{6});
                 const loss = try tracing_executor.elemMul(&cl_alloc, even_loss, loss_multipliers);
                 try notifier.notifyLoss(loss);
 
