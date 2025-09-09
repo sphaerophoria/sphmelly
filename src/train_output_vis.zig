@@ -10,7 +10,7 @@ const GraphPoint = gui.multi_line_graph.GraphPoint;
 const parser = @import("train_output_vis/parser.zig");
 
 const GuiAction = union(enum) {
-    update_scale_method: XAxisScaleMethod,
+    update_scale_method: XAxisScaleMethod.Method,
     update_log_color: struct {
         idx: usize,
         color: gui.Color,
@@ -64,7 +64,7 @@ const TrainingDataRetriever = struct {
     steps: *const parser.Steps,
 
     pub fn getGeneration(self: TrainingDataRetriever) usize {
-        return self.smoothing.generation;
+        return self.smoothing.generation + self.scale_method.generation;
     }
 
     pub fn getColor(self: TrainingDataRetriever) gui.Color {
@@ -164,7 +164,7 @@ const TrainingDataRetriever = struct {
 };
 
 fn resolveStepX(step: parser.Step, method: XAxisScaleMethod) f32 {
-    return switch (method) {
+    return switch (method.method) {
         .iter => asf32(step.iter),
         .@"wall time" => asf32(step.time_ns) / std.time.ns_per_s,
         .@"images processed" => asf32(step.img),
@@ -186,25 +186,30 @@ const Args = struct {
     }
 };
 
-const XAxisScaleMethod = enum {
-    iter,
-    @"wall time",
-    @"images processed",
+const XAxisScaleMethod = struct {
+    method: Method,
+    generation: usize,
+
+    const Method = enum {
+        iter,
+        @"wall time",
+        @"images processed",
+    };
 };
 
 const ScaleMethodAdaptor = struct {
     scale_method: *XAxisScaleMethod,
 
     pub fn getText(_: ScaleMethodAdaptor, idx: usize) []const u8 {
-        return @tagName(@as(XAxisScaleMethod, @enumFromInt(idx)));
+        return @tagName(@as(XAxisScaleMethod.Method, @enumFromInt(idx)));
     }
 
     pub fn selectedId(self: ScaleMethodAdaptor) usize {
-        return @intFromEnum(self.scale_method.*);
+        return @intFromEnum(self.scale_method.method);
     }
 
     pub fn numItems(_: ScaleMethodAdaptor) usize {
-        return std.meta.fields(XAxisScaleMethod).len;
+        return std.meta.fields(XAxisScaleMethod.Method).len;
     }
 };
 
@@ -393,7 +398,10 @@ pub fn main() !void {
         out.* = try parser.parseData(allocators.root.arena(), allocators.scratch.linear(), p, &keys);
     }
 
-    var scale_method = XAxisScaleMethod.iter;
+    var scale_method = XAxisScaleMethod{
+        .method = .iter,
+        .generation = 0,
+    };
     var smoothing: Smoothing = .{ .generation = 0, .val = 1 };
 
     const vis_state = try initVisState(allocators.root.arena(), training_data.len);
@@ -430,7 +438,8 @@ pub fn main() !void {
 
         if (response.action) |a| switch (a) {
             .update_scale_method => |new_method| {
-                scale_method = new_method;
+                scale_method.method = new_method;
+                scale_method.generation += 1;
             },
             .update_log_color => |params| {
                 vis_state[params.idx].color = params.color;
