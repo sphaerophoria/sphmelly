@@ -60,10 +60,10 @@ const ImageUpdater = struct {
     image_view: *tsv.ImageView(GuiAction),
     solid_color_renderer: *sphrender.xyt_program.SolidColorProgram,
     visualize_mask: bool,
+    config: Config,
 
     seed: u64,
     selected_image: usize = 0,
-    param_gen: BarcodeGen.RandomizationParams,
 
     const num_images = 9;
 
@@ -113,7 +113,7 @@ const ImageUpdater = struct {
 
         const bars = try self.barcode_gen.makeBars(
             self.cl_alloc,
-            self.param_gen,
+            self.config.data.rand_params,
             true,
             num_images,
             &rand_source,
@@ -151,9 +151,11 @@ const ImageUpdater = struct {
 
 const Args = struct {
     background_dir: []const u8,
+    config: []const u8,
 
     const Switch = enum {
         @"--background-dir",
+        @"--config",
     };
 
     fn parse(alloc: std.mem.Allocator) !Args {
@@ -162,6 +164,7 @@ const Args = struct {
         const process_name = it.next() orelse "imagegen";
 
         var background_dir: ?[]const u8 = null;
+        var config: ?[]const u8 = null;
 
         while (it.next()) |arg| {
             const s = std.meta.stringToEnum(Switch, arg) orelse {
@@ -174,12 +177,20 @@ const Args = struct {
                     std.log.err("Missing background dir arg", .{});
                     help(process_name);
                 },
+                .@"--config" => config = it.next() orelse {
+                    std.log.err("Missing config arg", .{});
+                    help(process_name);
+                },
             }
         }
 
         return .{
             .background_dir = background_dir orelse {
                 std.log.err("background dir not provided", .{});
+                help(process_name);
+            },
+            .config = config orelse {
+                std.log.err("config not provided", .{});
                 help(process_name);
             },
         };
@@ -193,6 +204,7 @@ const Args = struct {
             \\
             \\Required args:
             \\--background-dir: Where to load image backgrounds from
+            \\--config: Data configuration
             \\
         , .{process_name}) catch {};
 
@@ -200,7 +212,12 @@ const Args = struct {
     }
 };
 
-const img_size = 256;
+const Config = struct {
+    data: struct {
+        img_size: u32,
+        rand_params: BarcodeGen.RandomizationParams,
+    },
+};
 
 pub fn main() !void {
     var allocators: sphrender.AppAllocators(100) = undefined;
@@ -218,9 +235,15 @@ pub fn main() !void {
 
     const args = try Args.parse(allocators.root.arena());
 
+    const config = blk: {
+        const f = try std.fs.cwd().openFile(args.config, .{});
+        var json_reader = std.json.reader(allocators.root.arena(), f.reader());
+        break :blk try std.json.parseFromTokenSourceLeaky(Config, allocators.root.arena(), &json_reader, .{ .ignore_unknown_fields = true });
+    };
+
     const math_executor = try math.Executor.init(&cl_alloc, &cl_executor);
 
-    var barcode_gen = try BarcodeGen.init(allocators.scratch.linear(), &cl_alloc, math_executor, args.background_dir, img_size);
+    var barcode_gen = try BarcodeGen.init(allocators.scratch.linear(), &cl_alloc, math_executor, args.background_dir, config.data.img_size);
 
     gl.glEnable(gl.GL_SCISSOR_TEST);
     gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA);
@@ -253,21 +276,7 @@ pub fn main() !void {
         .math_executor = math_executor,
         .image_view = &image_view,
         .solid_color_renderer = &solid_color_renderer,
-        .param_gen = .{
-            // FIXME offset range should probably be a ratio of image size, not absolute pixels
-            .x_offs_range = .{ -50, 50 },
-            .y_offs_range = .{ -50, 50 },
-            .x_scale_range = .{ 0.2, 0.4 },
-            .aspect_range = .{ 0.4, 1.0 },
-            .min_contrast = 0.2,
-            .x_noise_multiplier_range = .{ 0, 0 },
-            .y_noise_multiplier_range = .{ 0, 0 },
-            .perlin_grid_size_range = .{ 10, 100 },
-            .background_color_range = .{ 0.0, 1.0 },
-            // FIXME Blur amount is in pixel space, maybe these should be
-            // scaled by resolution of inputs
-            .blur_stddev_range = .{ 0.0001, 3.0 },
-        },
+        .config = config,
         .seed = 0,
         .visualize_mask = false,
     };
