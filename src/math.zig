@@ -63,9 +63,16 @@ pub const TensorDims = struct {
         return self.numElems() * @sizeOf(f32);
     }
 
-    pub fn eql(self: TensorDims, other: TensorDims) bool {
-        if (self.inner.len != other.inner.len) return false;
-        for (self.inner, other.inner) |a, b| {
+    pub fn eql(self: TensorDims, other: anytype) bool {
+        switch (@TypeOf(other)) {
+            TensorDims => return eqlInner(self.inner, other.inner),
+            else => return eqlInner(self.inner, other),
+        }
+    }
+
+    fn eqlInner(self: []const u32, other: []const u32) bool {
+        if (self.len != other.len) return false;
+        for (self, other) |a, b| {
             if (a != b) return false;
         }
 

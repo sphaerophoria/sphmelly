@@ -455,7 +455,7 @@ pub fn Deferred(comptime T: type) type {
 
 pub fn createTensor(self: Executor, cl_alloc: *cl.Alloc, initial_data: []const f32, dims_in: []const u32) !Deferred(Tensor) {
     const params = try self.createTensorCommon(cl_alloc, initial_data, dims_in);
-    const event = try self.executor.writeBuffer(cl_alloc, params.buf, std.mem.sliceAsBytes(initial_data));
+    const event = try self.executor.writeBuffer(cl_alloc, params.buf, 0, std.mem.sliceAsBytes(initial_data));
 
     return .{
         .event = event,
@@ -1537,7 +1537,7 @@ test "bceWithLogits" {
     const output = try fixture.cl_math.bceWithLogits(fixture.cl_alloc, input, target);
     const output_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, output);
 
-    try std.testing.expect(output.dims.eql(try .init(fixture.cl_alloc.heap(), test_data.output.shape)));
+    try std.testing.expect(output.dims.eql(test_data.output.shape));
     for (test_data.output.data, output_cpu) |ex, ac| {
         try std.testing.expectApproxEqAbs(ex, ac, 0.0001);
     }
@@ -1545,7 +1545,7 @@ test "bceWithLogits" {
     const calculated_grads = try fixture.cl_math.bceWithLogitsGrad(fixture.cl_alloc, downstream_grad, input, target);
     const calculated_grads_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, calculated_grads);
 
-    try std.testing.expect(output.dims.eql(try .init(fixture.cl_alloc.heap(), test_data.input_grad.shape)));
+    try std.testing.expect(output.dims.eql(test_data.input_grad.shape));
     for (test_data.input_grad.data, calculated_grads_cpu) |ex, ac| {
         try std.testing.expectApproxEqAbs(ex, ac, 0.0001);
     }
@@ -1788,14 +1788,14 @@ test "convMany2" {
         const kernel = try test_elem.kernel.toTensor(fixture.cl_alloc, fixture.cl_math);
 
         const output = try fixture.cl_math.convMany(fixture.cl_alloc, img, kernel);
-        try std.testing.expect(output.dims.eql(try .init(fixture.cl_alloc.heap(), test_elem.output.shape)));
+        try std.testing.expect(output.dims.eql(test_elem.output.shape));
 
         const downstream_grad = try test_elem.downstream_grad.toTensor(fixture.cl_alloc, fixture.cl_math);
 
         const img_grads, const kernel_grads = try fixture.cl_math.convManyGrad(fixture.cl_alloc, downstream_grad, img, kernel);
 
-        try std.testing.expect(img_grads.dims.eql(try .init(fixture.cl_alloc.heap(), test_elem.img_grad.shape)));
-        try std.testing.expect(kernel_grads.dims.eql(try .init(fixture.cl_alloc.heap(), test_elem.kernel_grad.shape)));
+        try std.testing.expect(img_grads.dims.eql(test_elem.img_grad.shape));
+        try std.testing.expect(kernel_grads.dims.eql(test_elem.kernel_grad.shape));
 
         const output_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, output);
         const kg_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, kernel_grads);

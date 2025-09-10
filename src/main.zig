@@ -13,6 +13,7 @@ const nn = @import("nn.zig");
 const Optimizer = nn.Optimizer;
 const AppAllocators = sphrender.AppAllocators(100);
 const train_ui = @import("train_ui.zig");
+const nn_checkpoint = @import("nn/checkpoint.zig");
 
 const GuiDataReq = struct {
     alloc_buf: []u8,
@@ -486,6 +487,7 @@ const Config = struct {
     },
     log_freq: u32,
     val_freq: u32,
+    checkpoint_freq: u32,
     train_target: TrainTarget,
     heal_orientations: bool,
     loss_multipliers: []f32,
@@ -506,13 +508,13 @@ const Config = struct {
     }
 };
 
-fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Config, out_dir: std.fs.Dir) !void {
+fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Config, out_dir: std.fs.Dir, initial_checkpoint_path: ?[]const u8) !void {
     defer {
         channels.train_to_gui.send(.shutdown) catch {
             std.log.err("Failed to notify thread death", .{});
         };
     }
-    const cl_alloc_buf = try std.heap.page_allocator.alloc(u8, 10 * 1024 * 1024);
+    const cl_alloc_buf = try std.heap.page_allocator.alloc(u8, 1000 * 1024 * 1024);
     defer std.heap.page_allocator.free(cl_alloc_buf);
 
     var cl_alloc: cl.Alloc = undefined;
@@ -535,7 +537,13 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
     };
 
     const initializers = nn.makeInitializers(&tracing_executor, &rand_source);
-    const layers = try nn.modelFromConfig(&cl_alloc, &tracing_executor, &initializers, config.network.layers);
+
+    const checkpoint: ?[]nn.LayerWeights(math.TracingExecutor) = if (initial_checkpoint_path) |p|
+        try nn_checkpoint.loadCheckpoint(&cl_alloc, &tracing_executor, p)
+    else
+        null;
+
+    const layers = try nn.modelFromConfig(&cl_alloc, &tracing_executor, &initializers, config.network.layers, checkpoint);
 
     var barcode_gen = try BarcodeGen.init(
         // Probably a bit of a violation of separation, but we know that
@@ -727,6 +735,11 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                     try buf_writer.flush();
                 }
 
+                if (iter % config.checkpoint_freq == 0) {
+                    const checkpoint_name = try std.fmt.allocPrint(cl_alloc.heap(), "checkpoint_{d}", .{iter});
+                    try nn_checkpoint.write(&cl_alloc, &tracing_executor, out_dir, checkpoint_name, layers);
+                }
+
                 try cl_executor.finish();
             },
             .paused => |pause_cp| {
@@ -784,11 +797,13 @@ const Args = struct {
     background_dir: []const u8,
     config: []const u8,
     out_dir: []const u8,
+    checkpoint: ?[]const u8,
 
     const Switch = enum {
         @"--background-dir",
         @"--config",
         @"--out-dir",
+        @"--checkpoint",
     };
 
     fn parse(alloc: std.mem.Allocator) !Args {
@@ -799,6 +814,7 @@ const Args = struct {
         var background_dir: ?[]const u8 = null;
         var config: ?[]const u8 = null;
         var out_dir: ?[]const u8 = null;
+        var checkpoint: ?[]const u8 = null;
 
         while (it.next()) |arg| {
             const s = std.meta.stringToEnum(Switch, arg) orelse {
@@ -819,6 +835,10 @@ const Args = struct {
                     std.log.err("Missing out dir arg", .{});
                     help(process_name);
                 },
+                .@"--checkpoint" => checkpoint = it.next() orelse {
+                    std.log.err("Missing checkpoint arg", .{});
+                    help(process_name);
+                },
             }
         }
 
@@ -835,6 +855,7 @@ const Args = struct {
                 std.log.err("out dir not provided", .{});
                 help(process_name);
             },
+            .checkpoint = checkpoint,
         };
     }
 
@@ -848,6 +869,9 @@ const Args = struct {
             \\--background-dir: Where to load image backgrounds from
             \\--config: Training configuration path
             \\--out-dir: Where to save training output
+            \\
+            \\Optional args:
+            \\--checkpoint: Initial weights to load
             \\
         , .{process_name}) catch {};
 
@@ -880,7 +904,7 @@ pub fn main() !void {
 
     var comms = SharedChannels{};
 
-    const train_thread = try std.Thread.spawn(.{}, trainThread, .{ &comms, args.background_dir, config, out_dir });
+    const train_thread = try std.Thread.spawn(.{}, trainThread, .{ &comms, args.background_dir, config, out_dir, args.checkpoint });
     defer blk: {
         comms.gui_to_train.send(.shutdown) catch break :blk;
         train_thread.join();

@@ -21,6 +21,17 @@ fn assignIfTracing(comptime T: type, val: anytype) IfTracing(T, @TypeOf(val)) {
     if (isTracing(T)) return val;
 }
 
+pub fn WeightParam(comptime Executor: type) type {
+    return struct {
+        key: []const u8,
+        tensor: Executor.Tensor,
+    };
+}
+
+pub fn LayerWeights(comptime Executor: type) type {
+    return []WeightParam(Executor);
+}
+
 pub fn Layer(comptime Executor: type) type {
     return struct {
         vtable: *const VTable,
@@ -32,11 +43,19 @@ pub fn Layer(comptime Executor: type) type {
         pub const VTable = struct {
             getWeights: *const fn (ctx: ?*anyopaque, param_id: usize) anyerror!?Executor.TensorSlice,
             execute: *const fn (ctx: ?*anyopaque, cl_alloc: *cl.Alloc, executor: *Executor, input: Executor.Tensor) anyerror!Executor.Tensor,
+            exportWeights: ?*const fn (ctx: ?*anyopaque, alloc: std.mem.Allocator) anyerror![]WeightParam(Executor),
             registerWeights: if (isTracing(Executor))
                 *const fn (ctx: ?*anyopaque, optimizer: *Optimizer) anyerror!void
             else
                 void,
         };
+
+        pub fn exportWeights(self: Self, alloc: std.mem.Allocator) ![]WeightParam(Executor) {
+            if (self.vtable.exportWeights) |f| {
+                return try f(self.ctx, alloc);
+            }
+            return &.{};
+        }
 
         pub fn getWeights(self: Self, param_id: usize) !?Executor.TensorSlice {
             return try self.vtable.getWeights(self.ctx, param_id);
@@ -114,8 +133,24 @@ pub fn FullyConnected(comptime Executor: type) type {
         const layer_vtable = Layer(Executor).VTable{
             .getWeights = getWeights,
             .execute = execute,
+            .exportWeights = exportWeights,
             .registerWeights = assignIfTracing(Executor, registerWeights),
         };
+
+        fn exportWeights(ctx: ?*anyopaque, alloc: std.mem.Allocator) ![]WeightParam(Executor) {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+
+            const ret = try alloc.alloc(WeightParam(Executor), 2);
+            ret[0] = .{
+                .key = "weights",
+                .tensor = self.weights,
+            };
+            ret[1] = .{
+                .key = "biases",
+                .tensor = self.biases,
+            };
+            return ret;
+        }
 
         fn getWeights(ctx: ?*anyopaque, param_id: usize) !?Executor.TensorSlice {
             const self: *const Self = @ptrCast(@alignCast(ctx));
@@ -154,15 +189,40 @@ pub fn FullyConnected(comptime Executor: type) type {
     };
 }
 
-fn fullyConnectedLayer(comptime Executor: type, cl_alloc: *cl.Alloc, weights_initializer: Initializer(Executor), bias_initializer: Initializer(Executor), inputs: u32, outputs: u32) !Layer(Executor) {
-    const weights = try weights_initializer.generate(cl_alloc, inputs, &.{ inputs, outputs });
-    const biases = try bias_initializer.generate(cl_alloc, inputs, &.{ 1, outputs });
+fn fullyConnectedLayer(comptime Executor: type, cl_alloc: *cl.Alloc, weights_initializer: Initializer(Executor), bias_initializer: Initializer(Executor), inputs: u32, outputs: u32, layer_checkpoint: ?[]const WeightParam(Executor)) !Layer(Executor) {
+    var weights: ?Executor.Tensor = null;
+    var biases: ?Executor.Tensor = null;
+
+    if (layer_checkpoint) |c| {
+        for (c) |param| {
+            const ParamKey = enum { weights, biases };
+
+            const param_key = std.meta.stringToEnum(ParamKey, param.key) orelse return error.InvalidCheckpoint;
+            switch (param_key) {
+                .weights => {
+                    if (!param.tensor.dims.eql(&.{ inputs, outputs })) {
+                        return error.InvalidCheckpoint;
+                    }
+                    weights = param.tensor;
+                },
+                .biases => {
+                    if (!param.tensor.dims.eql(&.{ 1, outputs })) {
+                        return error.InvalidCheckpoint;
+                    }
+                    biases = param.tensor;
+                },
+            }
+        }
+    } else {
+        weights = try weights_initializer.generate(cl_alloc, inputs, &.{ inputs, outputs });
+        biases = try bias_initializer.generate(cl_alloc, inputs, &.{ 1, outputs });
+    }
 
     const fc_layer = try cl_alloc.heap().create(FullyConnected(Executor));
     fc_layer.* = .{
-        .weights = weights,
+        .weights = weights orelse return error.InvalidCheckpoint,
         .name = try std.fmt.allocPrint(cl_alloc.heap(), "fc ({d} -> {d})", .{ inputs, outputs }),
-        .biases = biases,
+        .biases = biases orelse return error.InvalidCheckpoint,
     };
 
     return fc_layer.layer();
@@ -178,12 +238,24 @@ pub fn Conv(comptime Executor: type) type {
         const layer_vtable = Layer(Executor).VTable{
             .getWeights = getWeights,
             .execute = execute,
+            .exportWeights = exportWeights,
             .registerWeights = assignIfTracing(Executor, registerWeights),
         };
 
         fn getWeights(ctx: ?*anyopaque, param_id: usize) !?Executor.TensorSlice {
             const self: *Self = @ptrCast(@alignCast(ctx));
             return try self.kernel.indexOuter(param_id);
+        }
+
+        fn exportWeights(ctx: ?*anyopaque, alloc: std.mem.Allocator) ![]WeightParam(Executor) {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+
+            const ret = try alloc.alloc(WeightParam(Executor), 1);
+            ret[0] = .{
+                .key = "kernel",
+                .tensor = self.kernel,
+            };
+            return ret;
         }
 
         fn execute(ctx: ?*anyopaque, cl_alloc: *cl.Alloc, executor: *Executor, input: Executor.Tensor) !Executor.Tensor {
@@ -207,9 +279,15 @@ pub fn Conv(comptime Executor: type) type {
     };
 }
 
-pub fn convLayer(comptime Executor: type, cl_alloc: *cl.Alloc, weights_initializer: Initializer(Executor), w: u32, h: u32, in_c: u32, out_c: u32) !Layer(Executor) {
+pub fn convLayer(comptime Executor: type, cl_alloc: *cl.Alloc, weights_initializer: Initializer(Executor), w: u32, h: u32, in_c: u32, out_c: u32, checkpoint: ?[]const WeightParam(Executor)) !Layer(Executor) {
     const fan_in = w * h * in_c;
-    const kernel = try weights_initializer.generate(cl_alloc, fan_in, &.{ w, h, in_c, out_c });
+
+    const kernel = if (checkpoint) |c| blk: {
+        if (c.len != 1) return error.InvalidCheckpoint;
+        if (!std.mem.eql(u8, c[0].key, "kernel")) return error.InvalidCheckpoint;
+        if (!c[0].tensor.dims.eql(&.{ w, h, in_c, out_c })) return error.InvalidCheckpoint;
+        break :blk c[0].tensor;
+    } else try weights_initializer.generate(cl_alloc, fan_in, &.{ w, h, in_c, out_c });
 
     const conv_layer = try cl_alloc.heap().create(Conv(Executor));
     conv_layer.* = .{
@@ -230,6 +308,7 @@ pub fn MaxPool(comptime Executor: type) type {
         const layer_vtable = Layer(Executor).VTable{
             .getWeights = nullGetWeights(Executor),
             .execute = execute,
+            .exportWeights = null,
             .registerWeights = assignIfTracing(Executor, nullRegisterWeights),
         };
 
@@ -302,6 +381,7 @@ pub fn Relu(comptime Executor: type) type {
         const layer_vtable = Layer(Executor).VTable{
             .getWeights = nullGetWeights(Executor),
             .execute = execute,
+            .exportWeights = null,
             .registerWeights = assignIfTracing(Executor, nullRegisterWeights),
         };
 
@@ -334,6 +414,7 @@ pub fn Reshape(comptime Executor: type) type {
         const layer_vtable = Layer(Executor).VTable{
             .getWeights = nullGetWeights(Executor),
             .execute = execute,
+            .exportWeights = null,
             .registerWeights = assignIfTracing(Executor, nullRegisterWeights),
         };
 
@@ -472,11 +553,18 @@ pub fn makeInitializers(executor: anytype, rand_source: *math.RandSource) Initia
     };
 }
 
-pub fn modelFromConfig(cl_alloc: *cl.Alloc, executor: anytype, initializers: *const Initializers(@TypeOf(executor.*)), layer_config: []const Config.LayerDef) ![]Layer(@TypeOf(executor.*)) {
+pub fn modelFromConfig(
+    cl_alloc: *cl.Alloc,
+    executor: anytype,
+    initializers: *const Initializers(@TypeOf(executor.*)),
+    layer_config: []const Config.LayerDef,
+    layer_checkpoints: ?[]const LayerWeights(@TypeOf(executor.*)),
+) ![]Layer(@TypeOf(executor.*)) {
     const Executor = @TypeOf(executor.*);
     const layers: []Layer(Executor) = try cl_alloc.heap().alloc(Layer(Executor), layer_config.len);
 
-    for (layer_config, layers) |layer_def, *layer| {
+    for (layer_config, layers, 0..) |layer_def, *layer, i| {
+        const layer_checkpoint = if (layer_checkpoints) |lc| lc[i] else null;
         layer.* = switch (layer_def) {
             .conv => |params| try convLayer(
                 Executor,
@@ -486,6 +574,7 @@ pub fn modelFromConfig(cl_alloc: *cl.Alloc, executor: anytype, initializers: *co
                 params[2],
                 params[3],
                 params[4],
+                layer_checkpoint,
             ),
             .relu => |leak| try reluLayer(Executor, cl_alloc.heap(), leak),
             .maxpool => |params| try maxpoolLayer(Executor, cl_alloc.heap(), params),
@@ -497,6 +586,7 @@ pub fn modelFromConfig(cl_alloc: *cl.Alloc, executor: anytype, initializers: *co
                 initializers.resolve(params[1]),
                 params[2],
                 params[3],
+                layer_checkpoint,
             ),
         };
     }

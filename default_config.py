@@ -27,6 +27,7 @@ config = {
     },
     "log_freq": 10,
     "val_freq": 100,
+    "checkpoint_freq": 5000,
     "heal_orientations": True,
     "loss_multipliers": [ 1, 1, 1, 0.6, 0.05, 0.05 ],
     "train_target": "bbox",
