@@ -65,8 +65,6 @@ const ImageUpdater = struct {
     seed: u64,
     selected_image: usize = 0,
 
-    const num_images = 9;
-
     fn tensorToRgbaCpu(self: ImageUpdater, img_tensor: math.Executor.Tensor) !CpuImage {
         const single_img_size = img_tensor.dims.get(0) * img_tensor.dims.get(1);
         const img_cpu_data = try self.scratch.alloc(f32, single_img_size);
@@ -115,7 +113,7 @@ const ImageUpdater = struct {
             self.cl_alloc,
             self.config.data.rand_params,
             true,
-            num_images,
+            self.config.data.batch_size,
             &rand_source,
         );
 
@@ -214,6 +212,7 @@ const Args = struct {
 
 const Config = struct {
     data: struct {
+        batch_size: u32,
         img_size: u32,
         rand_params: BarcodeGen.RandomizationParams,
     },
@@ -320,7 +319,7 @@ pub fn main() !void {
                 std.debug.print("{d}, {d}\n", .{ r.x, r.y });
             },
             .selected_image => |idx| {
-                image_view_updater.selected_image = std.math.clamp(idx, 0, ImageUpdater.num_images - 1);
+                image_view_updater.selected_image = std.math.clamp(idx, 0, config.data.batch_size - 1);
                 try image_view_updater.update();
             },
             .seed => |val| {
