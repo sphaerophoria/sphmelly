@@ -14,7 +14,7 @@ config = {
             "x_offs_range": [ -40, 40 ],
             "y_offs_range": [ -40, 40 ],
             "x_scale_range": [ 0.40, 0.60 ],
-            "rot_range": [ -math.pi / 2 , math.pi / 2 ],
+            "rot_range": [ -math.pi, math.pi ],
             "aspect_range": [ 0.4, 1.0 ],
             "min_contrast": 0.5,
             "x_noise_multiplier_range": [ 0, 0 ],
@@ -28,7 +28,6 @@ config = {
     "log_freq": 10,
     "val_freq": 100,
     "checkpoint_freq": 5000,
-    "heal_orientations": True,
     "loss_multipliers": [ 1, 1, 1, 0.6, 0.05, 0.05 ],
     "train_target": "bbox",
     "network": {

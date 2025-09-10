@@ -489,7 +489,6 @@ const Config = struct {
     val_freq: u32,
     checkpoint_freq: u32,
     train_target: TrainTarget,
-    heal_orientations: bool,
     loss_multipliers: []f32,
     network: nn.Config,
 
@@ -629,7 +628,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                 try notifier.notifyLayerOutputs(results);
                 try notifier.predictionsQueued(results[results.len - 1]);
 
-                if (config.train_target == .bbox and config.heal_orientations) {
+                if (config.train_target == .bbox) {
                     try barcode_gen.healOrientations(&cl_alloc, train_input.expected, tracing_executor.getClTensor(results[results.len - 1].buf));
                 }
                 try notifier.batchGenerationQueued(train_input.bars.imgs, train_input.bars.bounding_boxes);
@@ -684,9 +683,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                             if (iter % config.val_freq == 0) {
                                 const val_results = try nn.runLayers(&cl_alloc, validation_set.input, layers, &tracing_executor);
 
-                                if (config.heal_orientations) {
-                                    try barcode_gen.healOrientations(&cl_alloc, validation_set.expected, tracing_executor.getClTensor(val_results[val_results.len - 1].buf));
-                                }
+                                try barcode_gen.healOrientations(&cl_alloc, validation_set.expected, tracing_executor.getClTensor(val_results[val_results.len - 1].buf));
 
                                 const val_err = try math_executor.sub(&cl_alloc, tracing_executor.getClTensor(val_results[val_results.len - 1].buf), validation_set.expected);
 

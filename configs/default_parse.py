@@ -28,7 +28,6 @@ config = {
     "log_freq": 10,
     "val_freq": 100,
     "checkpoint_freq": 2000,
-    "heal_orientations": True,
     "loss_multipliers": [],
     "train_target": "bars",
     "network": {
