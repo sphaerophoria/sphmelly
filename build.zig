@@ -50,6 +50,14 @@ pub fn build(b: *std.Build) void {
     });
     addCommonDependencies(b, train_output_vis, sphtud_mod);
 
+    const box_box = b.addExecutable(.{
+        .name = "box_box",
+        .root_source_file = b.path("src/box_box.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    addCommonDependencies(b, box_box, sphtud_mod);
+
     const imagegen = b.addExecutable(.{
         .name = "imagegen",
         .root_source_file = b.path("src/imagegen.zig"),
@@ -79,4 +87,5 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
     b.installArtifact(imagegen);
     b.installArtifact(train_output_vis);
+    b.installArtifact(box_box);
 }
