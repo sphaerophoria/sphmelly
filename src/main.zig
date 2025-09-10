@@ -42,21 +42,26 @@ const TrainRequest = union(enum) {
     shutdown,
 };
 
-const TrainResponse = struct {
-    train_sample: ?struct {
-        img: CpuTensor,
-        expected: CpuTensor,
-        prediction: CpuTensor,
-        loss: f32,
-    } = null,
-    grads: ?CpuTensor = null,
-    weights: ?CpuTensor = null,
-    layer_output: ?CpuTensor = null,
+const TrainResponse = union(enum) {
+    const GuiData = struct {
+        train_sample: ?struct {
+            img: CpuTensor,
+            expected: CpuTensor,
+            prediction: CpuTensor,
+            loss: f32,
+        } = null,
+        grads: ?CpuTensor = null,
+        weights: ?CpuTensor = null,
+        layer_output: ?CpuTensor = null,
 
-    layer_name_update: []const u8 = &.{},
-    num_layers: u32 = 0,
+        layer_name_update: []const u8 = &.{},
+        num_layers: u32 = 0,
 
-    loss: f32 = 0.0,
+        loss: f32 = 0.0,
+    };
+
+    gui_data: GuiData,
+    shutdown,
 };
 
 const CpuTensorReadRes = struct {
@@ -92,10 +97,10 @@ const TrainResponseBuilder = struct {
         data: CpuTensor,
     } = null,
 
-    fn finish(self: *TrainResponseBuilder, req: GuiDataReq, layers: anytype, weights: ?CpuTensor) !TrainResponse {
+    fn finish(self: *TrainResponseBuilder, out_alloc: std.mem.Allocator, req: GuiDataReq, layers: anytype, weights: ?CpuTensor) !TrainResponse {
         defer self.* = .{};
 
-        var res = TrainResponse{};
+        var res = TrainResponse.GuiData{};
 
         if (self.train_sample) |s| {
             try s.event.wait();
@@ -141,13 +146,13 @@ const TrainResponseBuilder = struct {
         }
 
         if (req.active_layer_id < layers.len) {
-            res.layer_name_update = layers[req.active_layer_id].name;
+            res.layer_name_update = try out_alloc.dupe(u8, layers[req.active_layer_id].name);
         }
 
         res.weights = weights;
         res.num_layers = @intCast(layers.len);
 
-        return res;
+        return .{ .gui_data = res };
     }
 };
 
@@ -412,7 +417,7 @@ const TrainNotifier = struct {
     fn finish(self: *TrainNotifier, layers: anytype) !NotifyAction {
         if (self.current_data_request) |r| {
             const weights = try self.extractWeights(layers);
-            const response = try self.builder.finish(r, layers, weights);
+            const response = try self.builder.finish(self.alloc.?.allocator(), r, layers, weights);
             self.alloc = null;
             self.current_data_request = null;
             try self.comms.train_to_gui.send(response);
@@ -502,6 +507,11 @@ const Config = struct {
 };
 
 fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Config, out_dir: std.fs.Dir) !void {
+    defer {
+        channels.train_to_gui.send(.shutdown) catch {
+            std.log.err("Failed to notify thread death", .{});
+        };
+    }
     const cl_alloc_buf = try std.heap.page_allocator.alloc(u8, 10 * 1024 * 1024);
     defer std.heap.page_allocator.free(cl_alloc_buf);
 
@@ -948,8 +958,13 @@ pub fn main() !void {
             outstanding_req += 1;
         }
 
-        while (comms.train_to_gui.poll()) |response| {
+        while (comms.train_to_gui.poll()) |response_in| {
             // Make sure nothing is referencing old data
+
+            const response = switch (response_in) {
+                .gui_data => |r| r,
+                .shutdown => return,
+            };
 
             defer req_alloc_buf.swap();
 
