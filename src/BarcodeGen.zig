@@ -23,6 +23,7 @@ pub const RandomizationParams = struct {
     x_offs_range: [2]f32,
     y_offs_range: [2]f32,
     x_scale_range: [2]f32,
+    rot_range: [2]f32,
     aspect_range: [2]f32,
     min_contrast: f32,
     perlin_grid_size_range: [2]u32,
@@ -158,6 +159,10 @@ fn instanceRandParams(
         .{ .float = rand_params.x_scale_range[0] },
         // max_x_scale,
         .{ .float = rand_params.x_scale_range[1] },
+        // min_rot
+        .{ .float = rand_params.rot_range[0] },
+        // max_rot
+        .{ .float = rand_params.rot_range[1] },
         // min_aspect,
         .{ .float = rand_params.aspect_range[0] },
         // max_aspect,

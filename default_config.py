@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import math
 
 batch_size = 64;
 img_size = 256 * 0.75
@@ -13,6 +14,7 @@ config = {
             "x_offs_range": [ -40, 40 ],
             "y_offs_range": [ -40, 40 ],
             "x_scale_range": [ 0.40, 0.60 ],
+            "rot_range": [ -math.pi / 2 , math.pi / 2 ],
             "aspect_range": [ 0.4, 1.0 ],
             "min_contrast": 0.5,
             "x_noise_multiplier_range": [ 0, 0 ],

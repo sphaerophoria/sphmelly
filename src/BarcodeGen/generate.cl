@@ -250,6 +250,8 @@ __kernel void sample_barcode_params(
     float max_y_offs,
     float min_x_scale,
     float max_x_scale,
+    float min_rot,
+    float max_rot,
     float min_aspect,
     float max_aspect,
     float min_contrast,
@@ -283,7 +285,7 @@ __kernel void sample_barcode_params(
     float y_offs = randFloatBetween(&rng, min_y_offs, max_y_offs);
     float x_scale = randFloatBetween(&rng, min_x_scale, max_x_scale);
     float y_scale = randFloatBetween(&rng, min_aspect * x_scale, max_aspect * x_scale);
-    float rot = randFloatBetween(&rng, -M_PI / 2.0, M_PI / 2.0);
+    float rot = randFloatBetween(&rng, min_rot, max_rot);
 
     float contrast = randFloatBetween(&rng, min_contrast, 1.0);
     float dark_color = randFloatBetween(&rng, 0.0, 1.0 - contrast);
