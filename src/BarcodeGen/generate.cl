@@ -84,7 +84,8 @@ float sample_perlin_noise(uint x, uint y, uint seed, uint cell_width) {
 #define BARCODE_QUIET_ZONE_WIDTH 5
 #define BARCODE_DIGIT_WIDTH 7
 #define BARCODE_HALF_DIGITS_WIDTH (BARCODE_DIGIT_WIDTH * BARCODE_NUM_DIGITS / 2)
-#define BARCODE_NUM_MODULES (BARCODE_NUM_DIGITS * BARCODE_DIGIT_WIDTH + BARCODE_START_END_WIDTH * 2 + BARCODE_MIDDLE_WIDTH + BARCODE_QUIET_ZONE_WIDTH * 2)
+#define BARCODE_NO_QUIET_NUM_MODULES (BARCODE_NUM_DIGITS * BARCODE_DIGIT_WIDTH + BARCODE_START_END_WIDTH * 2 + BARCODE_MIDDLE_WIDTH)
+#define BARCODE_NUM_MODULES (BARCODE_NO_QUIET_NUM_MODULES + 2 * BARCODE_QUIET_ZONE_WIDTH)
 
 enum pattern_gen_purpose {
     PGP_QUIET,
@@ -201,10 +202,14 @@ bool module_color_from_info(struct pattern_gen_info info) {
 
 __kernel void generate_module_patterns(
     __global float* out,
+    __global float* out_no_quiet,
     uint num_patterns,
     uint seed,
     ulong ctr_start
 ) {
+    // out dims (BARCODE_NUM_MODULES, num_patterns)
+    // out_no_quiet dims (BARCODE_NUM_MODULES - BARCODE_QUIET_ZONE_WIDTH * 2, num_patterns)
+    //
     // Each thread is responsible for writing a single bar
     uint global_id = get_global_id(0);
     if (global_id >= num_patterns * BARCODE_NUM_MODULES) return;
@@ -213,6 +218,13 @@ __kernel void generate_module_patterns(
 
     struct pattern_gen_info info = get_pattern_gen_info(global_id % BARCODE_NUM_MODULES, ctr, seed);
     out[global_id] = module_color_from_info(info);
+
+    uint module_id = global_id % BARCODE_NUM_MODULES;
+    uint pattern_id = global_id / BARCODE_NUM_MODULES;
+    if (module_id >= BARCODE_QUIET_ZONE_WIDTH && module_id < BARCODE_NUM_MODULES - BARCODE_QUIET_ZONE_WIDTH) {
+        uint no_quiet_id = pattern_id * BARCODE_NO_QUIET_NUM_MODULES + module_id - BARCODE_QUIET_ZONE_WIDTH;
+        out_no_quiet[no_quiet_id] = out[global_id];
+    }
 }
 
 struct concrete_params {

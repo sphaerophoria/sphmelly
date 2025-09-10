@@ -29,6 +29,7 @@ config = {
     "val_freq": 100,
     "heal_orientations": True,
     "loss_multipliers": [ 1, 1, 1, 0.6, 0.05, 0.05 ],
+    "train_target": "bbox",
     "network": {
         "lr": 0.004,
         "layers": [

@@ -451,17 +451,26 @@ const TrainingInput = struct {
     expected: math.Executor.Tensor,
 };
 
-fn generateTrainingInput(cl_alloc: *cl.Alloc, barcode_gen: *BarcodeGen, rand_params: BarcodeGen.RandomizationParams, math_executor: math.Executor, rand_source: *math.RandSource, _: *TrainNotifier, train_num_images: u32, barcode_size: u32, enable_backgrounds: bool) !TrainingInput {
+fn generateTrainingInput(cl_alloc: *cl.Alloc, barcode_gen: *BarcodeGen, rand_params: BarcodeGen.RandomizationParams, math_executor: math.Executor, rand_source: *math.RandSource, _: *TrainNotifier, train_num_images: u32, barcode_size: u32, enable_backgrounds: bool, target: TrainTarget) !TrainingInput {
     const bars = try barcode_gen.makeBars(cl_alloc, rand_params, enable_backgrounds, train_num_images, rand_source);
 
     const batch_cl_4d = try math_executor.reshape(cl_alloc, bars.imgs, &.{ barcode_size, barcode_size, 1, train_num_images });
+    const expected = switch (target) {
+        .bbox => bars.bounding_boxes,
+        .bars => bars.bars,
+    };
 
     return .{
         .bars = bars,
         .input = batch_cl_4d,
-        .expected = bars.bounding_boxes,
+        .expected = expected,
     };
 }
+
+const TrainTarget = enum {
+    bbox,
+    bars,
+};
 
 const Config = struct {
     data: struct {
@@ -472,6 +481,7 @@ const Config = struct {
     },
     log_freq: u32,
     val_freq: u32,
+    train_target: TrainTarget,
     heal_orientations: bool,
     loss_multipliers: []f32,
     network: nn.Config,
@@ -492,7 +502,7 @@ const Config = struct {
 };
 
 fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Config, out_dir: std.fs.Dir) !void {
-    const cl_alloc_buf = try std.heap.page_allocator.alloc(u8, 1 * 1024 * 1024);
+    const cl_alloc_buf = try std.heap.page_allocator.alloc(u8, 10 * 1024 * 1024);
     defer std.heap.page_allocator.free(cl_alloc_buf);
 
     var cl_alloc: cl.Alloc = undefined;
@@ -560,6 +570,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
         val_size,
         config.data.img_size,
         config.data.enable_backgrounds,
+        config.train_target,
     );
 
     var iter: usize = 0;
@@ -593,20 +604,29 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                     config.data.batch_size,
                     config.data.img_size,
                     config.data.enable_backgrounds,
+                    config.train_target,
                 );
 
                 const results = try nn.runLayers(&cl_alloc, train_input.input, layers, &tracing_executor);
                 try notifier.notifyLayerOutputs(results);
                 try notifier.predictionsQueued(results[results.len - 1]);
 
-                if (config.heal_orientations) {
+                if (config.train_target == .bbox and config.heal_orientations) {
                     try barcode_gen.healOrientations(&cl_alloc, train_input.expected, tracing_executor.getClTensor(results[results.len - 1].buf));
                 }
                 try notifier.batchGenerationQueued(train_input.bars.imgs, train_input.bars.bounding_boxes);
+
                 const traced_expected = try tracing_executor.appendNode(train_input.expected, .init);
-                const even_loss = try tracing_executor.squaredErr(&cl_alloc, results[results.len - 1], traced_expected);
-                const loss_multipliers = try math_executor.createTensorUntracked(&cl_alloc, config.loss_multipliers, &.{6});
-                const loss = try tracing_executor.elemMul(&cl_alloc, even_loss, loss_multipliers);
+
+                const loss = blk: switch (config.train_target) {
+                    .bbox => {
+                        const even_loss = try tracing_executor.squaredErr(&cl_alloc, results[results.len - 1], traced_expected);
+                        const loss_multipliers = try math_executor.createTensorUntracked(&cl_alloc, config.loss_multipliers, &.{6});
+                        break :blk try tracing_executor.elemMul(&cl_alloc, even_loss, loss_multipliers);
+                    },
+                    .bars => try tracing_executor.bceWithLogits(&cl_alloc, results[results.len - 1], traced_expected),
+                };
+
                 try notifier.notifyLoss(loss);
 
                 switch (try trainer.step(loss)) {
@@ -622,63 +642,76 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                     const wall_time = (try std.time.Instant.now()).since(start_time);
 
                     try log_writer.print("step,{d},{d},{d}\n", .{ iter, wall_time, iter * config.data.batch_size });
+
                     const loss_cpu = try tracing_executor.toCpu(cl_alloc.heap(), &cl_alloc, loss);
-                    var total_losses: [6]f32 = @splat(0);
-                    for (0..loss_cpu.len / 6) |i| {
-                        for (0..6) |j| {
-                            total_losses[j] += loss_cpu[i * 6 + j];
-                        }
-                    }
-
-                    const labels: []const []const u8 = &.{ "dx", "dy", "dw", "dh", "drx", "dry" };
-                    for (total_losses, labels) |total_loss, label| {
-                        try log_writer.print("{s} loss,{d}\n", .{ label, total_loss });
-                    }
-                    var total_loss: f32 = 0;
-                    for (total_losses) |v| {
-                        total_loss += v;
-                    }
-                    try log_writer.print("total loss,{d}\n", .{total_loss});
-
-                    if (iter % config.val_freq == 0) {
-                        const val_results = try nn.runLayers(&cl_alloc, validation_set.input, layers, &tracing_executor);
-
-                        if (config.heal_orientations) {
-                            try barcode_gen.healOrientations(&cl_alloc, validation_set.expected, tracing_executor.getClTensor(val_results[val_results.len - 1].buf));
-                        }
-
-                        const val_err = try math_executor.sub(&cl_alloc, tracing_executor.getClTensor(val_results[val_results.len - 1].buf), validation_set.expected);
-
-                        const val_err_cpu = try math_executor.toCpu(cl_alloc.heap(), &cl_alloc, val_err);
-                        var total_val_mse: f32 = 0;
-                        for (val_err_cpu) |l| {
-                            total_val_mse += l * l;
-                        }
-
-                        std.debug.assert(val_err.dims.get(0) == 6);
-                        std.debug.assert(val_err.dims.len() == 2);
-                        var totals: [6]f32 = @splat(0);
-                        var sum_squares: [6]f32 = @splat(0);
-                        for (0..val_err_cpu.len / 6) |i| {
-                            for (0..6) |j| {
-                                const val = val_err_cpu[i * 6 + j];
-                                totals[j] += @abs(val);
-                                sum_squares[j] += val * val;
+                    switch (config.train_target) {
+                        .bbox => {
+                            var total_losses: [6]f32 = @splat(0);
+                            for (0..loss_cpu.len / 6) |i| {
+                                for (0..6) |j| {
+                                    total_losses[j] += loss_cpu[i * 6 + j];
+                                }
                             }
-                        }
-                        for (&totals) |*t| {
-                            t.* /= val_size;
-                        }
-                        for (&sum_squares) |*t| {
-                            t.* /= val_size;
-                        }
 
-                        try log_writer.print("val mse,{d}\n", .{total_val_mse / val_size});
+                            const labels: []const []const u8 = &.{ "dx", "dy", "dw", "dh", "drx", "dry" };
+                            for (total_losses, labels) |total_loss, label| {
+                                try log_writer.print("{s} loss,{d}\n", .{ label, total_loss });
+                            }
+                            var total_loss: f32 = 0;
+                            for (total_losses) |v| {
+                                total_loss += v;
+                            }
+                            try log_writer.print("total loss,{d}\n", .{total_loss});
 
-                        for (labels, totals, sum_squares) |label, average, mse| {
-                            try log_writer.print("avg {s},{d}\n", .{ label, average });
-                            try log_writer.print("mse {s},{d}\n", .{ label, mse });
-                        }
+                            if (iter % config.val_freq == 0) {
+                                const val_results = try nn.runLayers(&cl_alloc, validation_set.input, layers, &tracing_executor);
+
+                                if (config.heal_orientations) {
+                                    try barcode_gen.healOrientations(&cl_alloc, validation_set.expected, tracing_executor.getClTensor(val_results[val_results.len - 1].buf));
+                                }
+
+                                const val_err = try math_executor.sub(&cl_alloc, tracing_executor.getClTensor(val_results[val_results.len - 1].buf), validation_set.expected);
+
+                                const val_err_cpu = try math_executor.toCpu(cl_alloc.heap(), &cl_alloc, val_err);
+                                var total_val_mse: f32 = 0;
+                                for (val_err_cpu) |l| {
+                                    total_val_mse += l * l;
+                                }
+
+                                std.debug.assert(val_err.dims.get(0) == 6);
+                                std.debug.assert(val_err.dims.len() == 2);
+                                var totals: [6]f32 = @splat(0);
+                                var sum_squares: [6]f32 = @splat(0);
+                                for (0..val_err_cpu.len / 6) |i| {
+                                    for (0..6) |j| {
+                                        const val = val_err_cpu[i * 6 + j];
+                                        totals[j] += @abs(val);
+                                        sum_squares[j] += val * val;
+                                    }
+                                }
+                                for (&totals) |*t| {
+                                    t.* /= val_size;
+                                }
+                                for (&sum_squares) |*t| {
+                                    t.* /= val_size;
+                                }
+
+                                try log_writer.print("val mse,{d}\n", .{total_val_mse / val_size});
+
+                                for (labels, totals, sum_squares) |label, average, mse| {
+                                    try log_writer.print("avg {s},{d}\n", .{ label, average });
+                                    try log_writer.print("mse {s},{d}\n", .{ label, mse });
+                                }
+                            }
+                        },
+                        .bars => {
+                            var total_loss: f32 = 0;
+                            for (loss_cpu) |v| {
+                                total_loss += v;
+                            }
+
+                            try log_writer.print("loss,{d}\n", .{total_loss});
+                        },
                     }
 
                     try buf_writer.flush();

@@ -59,6 +59,7 @@ pub const Bars = struct {
     imgs: math.Executor.Tensor,
     masks: math.Executor.Tensor,
     bounding_boxes: math.Executor.Tensor,
+    bars: math.Executor.Tensor,
 };
 
 pub fn makeBars(self: BarcodeGen, cl_alloc: *cl.Alloc, rand_params: RandomizationParams, enable_backgrounds: bool, num_images: u32, rand_source: *math.RandSource) !Bars {
@@ -68,7 +69,7 @@ pub fn makeBars(self: BarcodeGen, cl_alloc: *cl.Alloc, rand_params: Randomizatio
 
     const sample_buf = try self.makeSampleBuf(cl_alloc, rand_source, num_barcodes);
     const blur_kernels = try self.makeBlurKernels(cl_alloc, 5, num_barcodes, rand_source, rand_params);
-    const instanced = try self.instanceRandParams(cl_alloc, sample_buf, rand_source, rand_params, out_dims);
+    const instanced = try self.instanceRandParams(cl_alloc, sample_buf.sample_buf, rand_source, rand_params, out_dims);
 
     const pass1_out = try self.runFirstPass(cl_alloc, instanced.params_buf, out_dims, enable_backgrounds);
     const pass2_out = try self.math_executor.maskedConv(cl_alloc, pass1_out.imgs, pass1_out.masks, blur_kernels);
@@ -77,6 +78,7 @@ pub fn makeBars(self: BarcodeGen, cl_alloc: *cl.Alloc, rand_params: Randomizatio
         .imgs = pass2_out,
         .masks = pass1_out.masks,
         .bounding_boxes = instanced.bounding_boxes,
+        .bars = sample_buf.no_quiet,
     };
 }
 
@@ -93,12 +95,19 @@ pub fn healOrientations(self: BarcodeGen, cl_alloc: *cl.Alloc, labels: math.Exec
     });
 }
 
-fn makeSampleBuf(self: BarcodeGen, cl_alloc: *cl.Alloc, rand_source: *math.RandSource, num_barcodes: u32) !math.Executor.Tensor {
-    const modules_per_pattern: u32 = @intCast(calcPatternWidth(12));
+const SampleBuf = struct {
+    sample_buf: math.Executor.Tensor,
+    no_quiet: math.Executor.Tensor,
+};
+
+fn makeSampleBuf(self: BarcodeGen, cl_alloc: *cl.Alloc, rand_source: *math.RandSource, num_barcodes: u32) !SampleBuf {
+    const modules_per_pattern: u32 = calcPatternWidth(12);
     const num_modules = modules_per_pattern * num_barcodes;
     const sample_buf = try self.math_executor.createTensorUninitialized(cl_alloc, &.{num_modules});
+    const no_quiet_buf = try self.math_executor.createTensorUninitialized(cl_alloc, &.{ calcPatternWidthNoQuiet(12), num_barcodes });
     try self.math_executor.executor.executeKernelUntracked(cl_alloc, self.module_gen_kernel, num_modules, &.{
         .{ .buf = sample_buf.buf },
+        .{ .buf = no_quiet_buf.buf },
         .{ .uint = num_barcodes },
         .{ .uint = rand_source.seed },
         .{ .ulong = rand_source.ctr },
@@ -106,7 +115,10 @@ fn makeSampleBuf(self: BarcodeGen, cl_alloc: *cl.Alloc, rand_source: *math.RandS
 
     rand_source.ctr += num_modules;
 
-    return sample_buf;
+    return .{
+        .sample_buf = sample_buf,
+        .no_quiet = no_quiet_buf,
+    };
 }
 
 const RandParams = struct {
@@ -252,8 +264,12 @@ const barcode_constants = struct {
     const quiet_zone_space = 10;
 };
 
-fn calcPatternWidth(len: usize) usize {
-    return len * 7 + barcode_constants.extra_width + barcode_constants.quiet_zone_space;
+fn calcPatternWidth(len: usize) u32 {
+    return @as(u32, @intCast(len)) * 7 + barcode_constants.extra_width + barcode_constants.quiet_zone_space;
+}
+
+fn calcPatternWidthNoQuiet(len: usize) u32 {
+    return @as(u32, @intCast(len)) * 7 + barcode_constants.extra_width;
 }
 
 fn loadImgScaledCpu(img_path: [:0]const u8, out_width: usize, out: []f32) !void {
