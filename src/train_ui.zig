@@ -3,6 +3,7 @@ const sphtud = @import("sphtud");
 const math = @import("math.zig");
 const tsv = @import("training_sample_view.zig");
 const gl = sphtud.render.gl;
+const Config = @import("Config.zig");
 
 pub const Gui = struct {
     window: sphtud.window.Window,
@@ -10,7 +11,7 @@ pub const Gui = struct {
     widgets: Widgets,
     train_num_images: u32,
 
-    pub fn initPinned(self: *Gui, allocators: anytype, initial_lr: f32, train_num_images: u32) !void {
+    pub fn initPinned(self: *Gui, allocators: anytype, initial_lr: f32, train_num_images: u32, train_mode: Config.TrainTarget) !void {
         self.* = .{
             .params = .init(initial_lr),
             .window = undefined,
@@ -26,7 +27,7 @@ pub const Gui = struct {
         gl.glLineWidth(2.0);
 
         const gui_alloc = try allocators.root_render.makeSubAlloc("gui");
-        self.widgets = try makeGuiWidgets(gui_alloc, &allocators.scratch, &allocators.scratch_gl, &self.params);
+        self.widgets = try makeGuiWidgets(gui_alloc, &allocators.scratch, &allocators.scratch_gl, &self.params, train_mode);
     }
 
     pub fn clear(self: *Gui) !void {
@@ -77,6 +78,32 @@ pub const Gui = struct {
             .color = color,
             .transform = sphtud.math.Transform.identity.inner,
         });
+    }
+
+    pub fn renderBarComparison(self: *Gui, _: *sphtud.render.GlAlloc, predicted: CpuTensor, expected: CpuTensor) !void {
+        std.debug.assert(predicted.dims.eql(&.{barcode_size}));
+        std.debug.assert(expected.dims.eql(&.{barcode_size}));
+
+        var rgba: [barcode_size]TexColor = undefined;
+
+        for (predicted.buf, 0..) |v_in, i| {
+            const v = 1.0 / (1.0 + std.math.exp(-v_in));
+            rgba[i] = .grey(v);
+        }
+        self.widgets.bar_retrievers.?.predicted.setData(&rgba);
+
+        for (expected.buf, 0..) |v, i| {
+            rgba[i] = .grey(v);
+        }
+        self.widgets.bar_retrievers.?.actual.setData(&rgba);
+
+        for (0..barcode_size) |i| {
+            const predicted_true = predicted.buf[i] > 0;
+            const expected_true = expected.buf[i] > 0.5;
+            const matches = predicted_true == expected_true;
+            rgba[i] = if (matches) .green else .red;
+        }
+        self.widgets.bar_retrievers.?.comparison.setData(&rgba);
     }
 
     pub fn step(ui: *Gui, width: u31, height: u31) !?GuiAction {
@@ -155,13 +182,67 @@ pub const GuiAction = union(enum) {
 
 const CpuTensor = math.Tensor([]f32);
 
+const barcode_size = 95;
+
+const TexColor = packed struct {
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
+
+    const red = @This(){ .r = 255, .g = 0, .b = 0, .a = 255 };
+    const green = @This(){ .r = 0, .g = 255, .b = 0, .a = 255 };
+
+    fn grey(val: f32) @This() {
+        const val_u8: u8 = @intFromFloat(std.math.clamp(val * 255, 0, 255));
+        return .{
+            .r = val_u8,
+            .g = val_u8,
+            .b = val_u8,
+            .a = 255,
+        };
+    }
+};
+
+const BarRetriever = struct {
+    texture: sphtud.render.Texture,
+
+    pub fn init(alloc: *sphtud.render.GlAlloc) !BarRetriever {
+        return .{
+            .texture = try sphtud.render.makeTextureCommon(alloc),
+        };
+    }
+    pub fn getSize(_: BarRetriever) sphtud.ui.PixelSize {
+        return .{
+            .width = barcode_size,
+            .height = 1,
+        };
+    }
+
+    pub fn getTexture(self: BarRetriever) sphtud.render.Texture {
+        return self.texture;
+    }
+
+    pub fn setData(self: BarRetriever, data: []const TexColor) void {
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture.inner);
+        gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA, barcode_size, 1, 0, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, data.ptr);
+        gl.glBindTexture(gl.GL_TEXTURE_2D, 0);
+    }
+};
+
+const BarRetrievers = struct {
+    predicted: BarRetriever,
+    actual: BarRetriever,
+    comparison: BarRetriever,
+};
 const Widgets = struct {
     image_view: *tsv.ImageView(GuiAction),
     runner: sphtud.ui.runner.Runner(GuiAction),
     solid_color_renderer: *sphtud.render.xyt_program.SolidColorProgram,
+    bar_retrievers: ?BarRetrievers,
 };
 
-fn makeGuiWidgets(gui_alloc: sphtud.ui.GuiAlloc, scratch: *sphtud.alloc.BufAllocator, scratch_gl: *sphtud.render.GlAlloc, gui_params: *GuiParams) !Widgets {
+fn makeGuiWidgets(gui_alloc: sphtud.ui.GuiAlloc, scratch: *sphtud.alloc.BufAllocator, scratch_gl: *sphtud.render.GlAlloc, gui_params: *GuiParams, train_target: Config.TrainTarget) !Widgets {
     const gui_state = try sphtud.ui.widget_factory.widgetState(
         GuiAction,
         gui_alloc,
@@ -222,12 +303,37 @@ fn makeGuiWidgets(gui_alloc: sphtud.ui.GuiAlloc, scratch: *sphtud.alloc.BufAlloc
         .img_loss = &gui_params.img_loss,
     }));
 
+    var bar_retrievers: ?BarRetrievers = null;
+    if (train_target == .bars) {
+        bar_retrievers = BarRetrievers{
+            .predicted = try .init(gui_alloc.gl),
+            .actual = try .init(gui_alloc.gl),
+            .comparison = try .init(gui_alloc.gl),
+        };
+
+        const pairs = &.{
+            .{ bar_retrievers.?.predicted, "predicted" },
+            .{ bar_retrievers.?.actual, "actual" },
+            .{ bar_retrievers.?.comparison, "comparison" },
+        };
+
+        inline for (pairs) |pair| {
+            try right_layout.pushWidget(try widget_factory.makeLabel(pair[1]));
+            try right_layout.pushWidget(try widget_factory.makeBox(
+                try widget_factory.makeThumbnail(pair[0]),
+                .{ .width = 0, .height = 20 },
+                .fill_width,
+            ));
+        }
+    }
+
     try right_layout.pushWidget(image_view.asWidget());
 
     return .{
         .image_view = image_view,
         .runner = try widget_factory.makeRunner(left_to_right.asWidget()),
         .solid_color_renderer = solid_color_renderer,
+        .bar_retrievers = bar_retrievers,
     };
 }
 

@@ -14,6 +14,7 @@ const Optimizer = nn.Optimizer;
 const AppAllocators = sphrender.AppAllocators(100);
 const train_ui = @import("train_ui.zig");
 const nn_checkpoint = @import("nn/checkpoint.zig");
+const Config = @import("Config.zig");
 
 const GuiDataReq = struct {
     alloc_buf: []u8,
@@ -457,7 +458,7 @@ const TrainingInput = struct {
     expected: math.Executor.Tensor,
 };
 
-fn generateTrainingInput(cl_alloc: *cl.Alloc, barcode_gen: *BarcodeGen, rand_params: BarcodeGen.RandomizationParams, math_executor: math.Executor, rand_source: *math.RandSource, _: *TrainNotifier, train_num_images: u32, barcode_size: u32, enable_backgrounds: bool, target: TrainTarget) !TrainingInput {
+fn generateTrainingInput(cl_alloc: *cl.Alloc, barcode_gen: *BarcodeGen, rand_params: BarcodeGen.RandomizationParams, math_executor: math.Executor, rand_source: *math.RandSource, _: *TrainNotifier, train_num_images: u32, barcode_size: u32, enable_backgrounds: bool, target: Config.TrainTarget) !TrainingInput {
     const bars = try barcode_gen.makeBars(cl_alloc, rand_params, enable_backgrounds, train_num_images, rand_source);
 
     const batch_cl_4d = try math_executor.reshape(cl_alloc, bars.imgs, &.{ barcode_size, barcode_size, 1, train_num_images });
@@ -472,40 +473,6 @@ fn generateTrainingInput(cl_alloc: *cl.Alloc, barcode_gen: *BarcodeGen, rand_par
         .expected = expected,
     };
 }
-
-const TrainTarget = enum {
-    bbox,
-    bars,
-};
-
-const Config = struct {
-    data: struct {
-        batch_size: u32,
-        img_size: u32,
-        rand_params: BarcodeGen.RandomizationParams,
-        enable_backgrounds: bool,
-    },
-    log_freq: u32,
-    val_freq: u32,
-    checkpoint_freq: u32,
-    train_target: TrainTarget,
-    loss_multipliers: []f32,
-    network: nn.Config,
-
-    pub fn parse(leaky: std.mem.Allocator, path: []const u8) !Config {
-        const f = try std.fs.cwd().openFile(path, .{});
-        defer f.close();
-
-        var json_reader = std.json.reader(leaky, f.reader());
-        const ret = try std.json.parseFromTokenSourceLeaky(Config, leaky, &json_reader, .{});
-
-        if (ret.val_freq % ret.log_freq != 0) {
-            return error.InvalidValFreq;
-        }
-
-        return ret;
-    }
-};
 
 fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Config, out_dir: std.fs.Dir, initial_checkpoint_path: ?[]const u8) !void {
     defer {
@@ -631,7 +598,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                 if (config.train_target == .bbox) {
                     try barcode_gen.healOrientations(&cl_alloc, train_input.expected, tracing_executor.getClTensor(results[results.len - 1].buf));
                 }
-                try notifier.batchGenerationQueued(train_input.bars.imgs, train_input.bars.bounding_boxes);
+                try notifier.batchGenerationQueued(train_input.bars.imgs, train_input.expected);
 
                 const traced_expected = try tracing_executor.appendNode(train_input.expected, .init);
 
@@ -897,7 +864,7 @@ pub fn main() !void {
     }
 
     var ui: train_ui.Gui = undefined;
-    try ui.initPinned(&allocators, config.network.lr, config.data.batch_size);
+    try ui.initPinned(&allocators, config.network.lr, config.data.batch_size, config.train_target);
 
     var comms = SharedChannels{};
 
@@ -998,8 +965,16 @@ pub fn main() !void {
 
             if (response.train_sample) |sample| {
                 try ui.setImageGrayscale(allocators.scratch.allocator(), sample.img);
-                try ui.renderBBoxOverlay(&allocators.scratch_gl, sample.expected, .{ 1, 0, 0 });
-                try ui.renderBBoxOverlay(&allocators.scratch_gl, sample.prediction, .{ 0, 0, 1 });
+
+                switch (config.train_target) {
+                    .bbox => {
+                        try ui.renderBBoxOverlay(&allocators.scratch_gl, sample.expected, .{ 1, 0, 0 });
+                        try ui.renderBBoxOverlay(&allocators.scratch_gl, sample.prediction, .{ 0, 0, 1 });
+                    },
+                    .bars => {
+                        try ui.renderBarComparison(&allocators.scratch_gl, sample.prediction, sample.expected);
+                    },
+                }
 
                 ui.params.img_loss = sample.loss;
             } else {
