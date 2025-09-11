@@ -11,6 +11,7 @@ data: struct {
 },
 log_freq: u32,
 val_freq: u32,
+val_size: u32,
 checkpoint_freq: u32,
 train_target: TrainTarget,
 loss_multipliers: []f32,

@@ -27,6 +27,7 @@ config = {
     },
     "log_freq": 10,
     "val_freq": 100,
+    "val_size": 50,
     "checkpoint_freq": 2000,
     "loss_multipliers": [],
     "train_target": "bars",
