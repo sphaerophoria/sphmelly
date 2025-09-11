@@ -543,7 +543,6 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
         unpaused,
     } = .unpaused;
 
-    const val_size = 200;
     const validation_set = try generateTrainingInput(
         &cl_alloc,
         &barcode_gen,
@@ -551,7 +550,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
         math_executor,
         &rand_source,
         &notifier,
-        val_size,
+        config.val_size,
         config.data.img_size,
         config.data.enable_backgrounds,
         config.train_target,
@@ -671,14 +670,15 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                                         sum_squares[j] += val * val;
                                     }
                                 }
+                                const val_size_f: f32 = @floatFromInt(config.val_size);
                                 for (&totals) |*t| {
-                                    t.* /= val_size;
+                                    t.* /= val_size_f;
                                 }
                                 for (&sum_squares) |*t| {
-                                    t.* /= val_size;
+                                    t.* /= val_size_f;
                                 }
 
-                                try log_writer.print("val mse,{d}\n", .{total_val_mse / val_size});
+                                try log_writer.print("val mse,{d}\n", .{total_val_mse / val_size_f});
 
                                 for (labels, totals, sum_squares) |label, average, mse| {
                                     try log_writer.print("avg {s},{d}\n", .{ label, average });
@@ -693,6 +693,43 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                             }
 
                             try log_writer.print("loss,{d}\n", .{total_loss});
+
+                            if (iter % config.val_freq == 0) {
+                                const val_results = try nn.runLayers(&cl_alloc, validation_set.input, layers, &tracing_executor);
+                                const val_result_cpu = try tracing_executor.toCpu(cl_alloc.heap(), &cl_alloc, val_results[val_results.len - 1]);
+                                const expected_cpu = try math_executor.toCpu(cl_alloc.heap(), &cl_alloc, validation_set.expected);
+
+                                var correct_bars: usize = 0;
+                                var correct_codes: usize = 0;
+                                const bars_per_code = val_results[val_results.len - 1].dims.get(0);
+                                for (0..config.val_size) |img_idx| {
+                                    var code_correct = true;
+                                    for (0..bars_per_code) |bar_idx| {
+                                        const predicted = val_result_cpu[bars_per_code * img_idx + bar_idx];
+                                        const actual = expected_cpu[bars_per_code * img_idx + bar_idx];
+                                        const predicted_true = predicted > 0;
+                                        const actual_true = actual > 0.5;
+
+                                        if (predicted_true == actual_true) {
+                                            correct_bars += 1;
+                                        } else {
+                                            code_correct = false;
+                                        }
+                                    }
+
+                                    if (code_correct) {
+                                        correct_codes += 1;
+                                    }
+                                }
+
+                                const bars_per_code_f: f32 = @floatFromInt(bars_per_code);
+                                const val_size_f: f32 = @floatFromInt(config.val_size);
+                                try log_writer.print("correct bars,{d}\n", .{correct_bars});
+                                try log_writer.print("correct bars ratio,{d}\n", .{@as(f32, @floatFromInt(correct_bars)) / val_size_f / bars_per_code_f});
+
+                                try log_writer.print("correct codes,{d}\n", .{correct_codes});
+                                try log_writer.print("correct codes ratio,{d}\n", .{@as(f32, @floatFromInt(correct_codes)) / val_size_f});
+                            }
                         },
                     }
 
