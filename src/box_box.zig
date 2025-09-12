@@ -5,6 +5,8 @@ const sphrender = sphtud.render;
 const gl = sphrender.gl;
 const sphwindow = sphtud.window;
 const gui = sphtud.ui;
+const cl = @import("cl.zig");
+const math = @import("math.zig");
 
 const Line = struct {
     a: sphtud.math.Vec2,
@@ -40,6 +42,14 @@ const Box = struct {
     w: f32,
     h: f32,
     r: f32,
+
+    fn toCl(self: Box, cl_alloc: *cl.Alloc, executor: math.Executor) !math.Executor.Tensor {
+        const data: [5]f32 = .{self.x, self.y, std.math.sqrt(self.w), std.math.sqrt(self.h), self.r};
+        const res = try executor.createTensor(cl_alloc, &data, &.{5, 1});
+        try res.event.wait();
+
+        return res.val;
+    }
 
     const default = Box{
         .x = 0,
@@ -212,6 +222,20 @@ pub fn main() !void {
 
     const sidebar_width = 200;
 
+    const cl_alloc_buf = try std.heap.page_allocator.alloc(u8, 1000 * 1024 * 1024);
+    defer std.heap.page_allocator.free(cl_alloc_buf);
+
+    var cl_alloc: cl.Alloc = undefined;
+    try cl_alloc.initPinned(cl_alloc_buf);
+    defer cl_alloc.deinit();
+
+    const profiling_mode = cl.Executor.ProfilingMode.non_profiling;
+
+    var cl_executor = try cl.Executor.init(cl_alloc.heap(), profiling_mode);
+    defer cl_executor.deinit();
+
+    const math_executor = try math.Executor.init(&cl_alloc, &cl_executor);
+
     var window: sphwindow.Window = undefined;
     try window.initPinned("sphui demo", 600 + sidebar_width, 600);
 
@@ -283,8 +307,10 @@ pub fn main() !void {
     var point_source = try sphrender.xyt_program.RenderSource.init(gui_alloc.gl);
     point_source.bindData(gui_state.solid_color_renderer.handle(), point_buf);
 
+    const cl_checkpoint = cl_alloc.checkpoint();
     while (!window.closed()) {
         allocators.resetScratch();
+        cl_alloc.reset(cl_checkpoint);
         const width, const height = window.getWindowSize();
 
         gl.glViewport(0, 0, @intCast(width), @intCast(height));
@@ -313,6 +339,14 @@ pub fn main() !void {
 
         gl.glLineWidth(3.0);
 
+        const intersection_gpu = try math_executor.calcIou(
+            &cl_alloc,
+            try box_1.toCl(&cl_alloc, math_executor),
+            try box_2.toCl(&cl_alloc, math_executor),
+        );
+
+        const intersection_points = try math_executor.toCpu(cl_alloc.heap(), &cl_alloc, intersection_gpu);
+
         const b1_txfm = sphtud.math.Transform.scale(
             box_1.w / 2,
             box_1.h / 2,
@@ -335,30 +369,33 @@ pub fn main() !void {
             .transform = b2_txfm.inner,
         });
 
-        gl.glPointSize(5.0);
-        const intersection_points = try calcIntersection(allocators.scratch.allocator(), box_1, box_2);
+        gl.glPointSize(10.0);
+        //const intersection_points = try calcIntersection(allocators.scratch.allocator(), box_1, box_2);
         //const intersection_points: []const sphtud.math.Vec2 = &.{lineLineIntersection(box_1.top(), box_2.top())};
 
-        var average: sphtud.math.Vec2 = @splat(0);
+        //var average: sphtud.math.Vec2 = @splat(0);
 
-        for (intersection_points) |p| {
-            average += p;
-        }
-        average /= @splat(@floatFromInt(intersection_points.len));
+        //for (intersection_points) |p| {
+        //    average += p;
+        //}
+        //average /= @splat(@floatFromInt(intersection_points.len));
 
         var gl_buf = try sphtud.util.RuntimeBoundedArray(sphtud.render.xyt_program.Vertex).init(allocators.scratch.allocator(), 30);
 
-        try gl_buf.append(.{ .vPos = average });
-        for (intersection_points) |p| {
-            try gl_buf.append(.{ .vPos = p });
+        for (0..intersection_points.len / 2) |i| {
+            try gl_buf.append(.{ .vPos = .{ intersection_points[i * 2], intersection_points[i * 2 + 1]}});
         }
-        if (intersection_points.len > 0) {
-            try gl_buf.append(.{ .vPos = intersection_points[0] });
-        }
+        //try gl_buf.append(.{ .vPos = average });
+        //for (intersection_points) |p| {
+        //    try gl_buf.append(.{ .vPos = p });
+        //}
+        //if (intersection_points.len > 0) {
+        //    try gl_buf.append(.{ .vPos = intersection_points[0] });
+        //}
 
         point_buf.updateBuffer(gl_buf.items);
         point_source.bindData(gui_state.solid_color_renderer.handle(), point_buf);
-        gui_state.solid_color_renderer.renderFan(point_source, .{
+        gui_state.solid_color_renderer.renderPoints(point_source, .{
             .color = .{ 0, 1, 0 },
             .transform = sphtud.math.Transform.identity.inner,
         });

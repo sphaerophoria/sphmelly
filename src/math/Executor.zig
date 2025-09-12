@@ -19,6 +19,7 @@ pub const conv_program_content = @embedFile("conv.cl");
 pub const maxpool_program_content = @embedFile("max_pool.cl");
 pub const has_nan_program_content = @embedFile("has_nan.cl");
 pub const bce_program_content = @embedFile("bce.cl");
+pub const iou_program_content = @embedFile("iou.cl");
 
 matmul_kernel: cl.Executor.Kernel,
 matmul_grad_a_kernel: cl.Executor.Kernel,
@@ -51,6 +52,7 @@ maxpool_kernel: cl.Executor.Kernel,
 maxpool_grad_kernel: cl.Executor.Kernel,
 has_nan_kernel: cl.Executor.Kernel,
 transpose_kernel: cl.Executor.Kernel,
+calc_iou_kernel: cl.Executor.Kernel,
 executor: *cl.Executor,
 
 pub fn init(cl_alloc: *cl.Alloc, executor: *cl.Executor) !Executor {
@@ -111,6 +113,9 @@ pub fn init(cl_alloc: *cl.Alloc, executor: *cl.Executor) !Executor {
     const has_nan_program = try executor.createProgram(cl_alloc, has_nan_program_content);
     const has_nan_kernel = try has_nan_program.createKernel(cl_alloc, "has_nan");
 
+    const iou_program = try executor.createProgram(cl_alloc, iou_program_content);
+    const calc_iou_kernel = try iou_program.createKernel(cl_alloc, "calc_iou");
+
     return .{
         .matmul_kernel = matmul_kernel,
         .matmul_grad_a_kernel = matmul_grad_a_kernel,
@@ -143,6 +148,7 @@ pub fn init(cl_alloc: *cl.Alloc, executor: *cl.Executor) !Executor {
         .maxpool_kernel = maxpool_kernel,
         .maxpool_grad_kernel = maxpool_grad_kernel,
         .has_nan_kernel = has_nan_kernel,
+        .calc_iou_kernel = calc_iou_kernel,
         .executor = executor,
     };
 }
@@ -1027,6 +1033,35 @@ pub fn maxpoolGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_grads: Tensor
     });
 
     return out_grads;
+}
+
+pub fn calcIou(self: Executor, cl_alloc: *cl.Alloc, as: Tensor, bs: Tensor) !Tensor {
+    // as: (5, n)
+    // bs: (5, n)
+    // out: n
+    if (as.dims.len() != 2 or bs.dims.len() != 2) {
+        return error.InvalidDims;
+    }
+
+    if (as.dims.get(0) != 5) {
+        return error.InvalidDims;
+    }
+
+    if (!as.dims.eql(bs.dims)) {
+        return error.InvalidDims;
+    }
+
+    const n = as.dims.get(1);
+    const ret = try self.createTensorUninitialized(cl_alloc, &.{16, n});
+
+    try self.executor.executeKernelUntracked(cl_alloc, self.calc_iou_kernel, n, &.{
+        .{ .buf = as.buf },
+        .{ .buf = bs.buf },
+        .{ .buf = ret.buf },
+        .{ .uint = n },
+    });
+
+    return ret;
 }
 
 const ClExecutorFixture = struct {
