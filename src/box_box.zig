@@ -12,49 +12,19 @@ const Line = struct {
 };
 
 fn lineLineIntersection(l1: Line, l2: Line) sphtud.math.Vec2 {
-    // Given the following line intersection between a-b and c-d
-    // * Dot product ac onto ab_norm to find e
-    // * Dot product dc on to ab_norm to find f
-    // * Ratio of ce to cf is the same as the ratio as df to xe
-    // * Use that ratio to find x
-    //
-    //              c
-    //            /|
-    //          x/ |e
-    //    a -------------- b
-    //         /   |
-    //        /____|
-    //       d      f
-    //
-    //
-    // Note that by what feels like chance, as c/d rotate such that c is to the
-    // left of d, x ends up to the right of e, cf and fd's purposes invert, and
-    // everything else still works
-    //
-    // Maybe we should have looked up the answer instead of hand rolling, but
-    // here we are :)
     const a = l1.a;
     const b = l1.b;
-    const c = l2.b;
-    const d = l2.a;
+    const c = l2.a;
+    const d = l2.b;
 
-    const ab_norm = sphtud.math.normalize(b - a);
-    const ae_len: sphtud.math.Vec2 = @splat(sphtud.math.dot(c - a, ab_norm));
+    const r = b - a;
+    const s = d - c;
 
-    const e = a + ab_norm * ae_len;
-    const cd = d - c;
-    const ce = e - c;
+    const denom = sphtud.math.cross2(r, s);
+    if (denom == 0) return @splat(std.math.inf(f32));
 
-    const ce_norm  = sphtud.math.normalize(ce);
-    const ce_len = sphtud.math.length(ce);
-    const cf_len = sphtud.math.dot(cd, ce_norm);
-    const df_len = sphtud.math.dot(-cd, ab_norm);
-
-    const small_tri_ratio = ce_len / cf_len;
-
-    const xe_len: sphtud.math.Vec2 = @splat(df_len * small_tri_ratio);
-    const ax_len = ae_len - xe_len;
-    return a + ab_norm * ax_len;
+    const t = sphtud.math.cross2(c - a, s) / denom;
+    return a + r * @as(sphtud.math.Vec2, @splat(t));
 }
 
 const GuiAction = union(enum) {
@@ -227,7 +197,7 @@ fn calcIntersection(alloc: std.mem.Allocator, b1: Box, b2: Box) ![]sphtud.math.V
                 .a = p,
                 .b = ret[in_idx].items[(i + 1) % ret[in_idx].items.len],
             };
-            const intersection_point = lineLineIntersection(clip_edge, intersection_line);
+            const intersection_point = lineLineIntersection(clip_edge, intersection_line) ;
             if (pointInBounds(intersection_point, intersection_line)) {
                 try ret[out_idx].append(intersection_point);
             }
@@ -379,13 +349,13 @@ pub fn main() !void {
 
         var gl_buf = try sphtud.util.RuntimeBoundedArray(sphtud.render.xyt_program.Vertex).init(allocators.scratch.allocator(), 30);
 
-        //try gl_buf.append(.{ .vPos = average });
+        try gl_buf.append(.{ .vPos = average });
         for (intersection_points) |p| {
             try gl_buf.append(.{ .vPos = p });
         }
-        //if (intersection_points.len > 0) {
-        //    try gl_buf.append(.{ .vPos = intersection_points[0] });
-        //}
+        if (intersection_points.len > 0) {
+            try gl_buf.append(.{ .vPos = intersection_points[0] });
+        }
 
         point_buf.updateBuffer(gl_buf.items);
         point_source.bindData(gui_state.solid_color_renderer.handle(), point_buf);
