@@ -197,7 +197,7 @@ fn calcIntersection(alloc: std.mem.Allocator, b1: Box, b2: Box) ![]sphtud.math.V
                 .a = p,
                 .b = ret[in_idx].items[(i + 1) % ret[in_idx].items.len],
             };
-            const intersection_point = lineLineIntersection(clip_edge, intersection_line) ;
+            const intersection_point = lineLineIntersection(clip_edge, intersection_line);
             if (pointInBounds(intersection_point, intersection_line)) {
                 try ret[out_idx].append(intersection_point);
             }
@@ -312,7 +312,6 @@ pub fn main() !void {
         gl.glClear(gl.GL_COLOR_BUFFER_BIT);
 
         gl.glLineWidth(3.0);
-
 
         const b1_txfm = sphtud.math.Transform.scale(
             box_1.w / 2,

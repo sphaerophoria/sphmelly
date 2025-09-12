@@ -728,7 +728,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                                 try log_writer.print("correct bars ratio,{d}\n", .{@as(f32, @floatFromInt(correct_bars)) / val_size_f / bars_per_code_f});
 
                                 try log_writer.print("correct codes,{d}\n", .{correct_codes});
-                                try log_writer.print("correct codes ratio,{d}\n", .{@as(f32, @floatFromInt(correct_codes)) / val_size_f });
+                                try log_writer.print("correct codes ratio,{d}\n", .{@as(f32, @floatFromInt(correct_codes)) / val_size_f});
                             }
                         },
                     }
