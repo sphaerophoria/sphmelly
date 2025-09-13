@@ -1,7 +1,3 @@
-float lerp(float a, float b, float t) {
-    return t * (b - a) + a;
-}
-
 bool sample1d(__global float* input, uint len, float x1, float x2, float* out) {
     if (x1 < 0 || x2 < 0 || x1 > len) return false;
     uint left_input_id = x1;
@@ -446,11 +442,6 @@ __kernel void generate_barcode(
         mask_ret[global_id] = 1.0;
     }
 }
-
-float sample_normal_dist(float x) {
-    return exp(-(x * x) / 2.0f) / sqrt(2.0f * M_PI);
-}
-
 __kernel void generate_blur_kernels(
         __global float* ret,
         // width or height, not width * height
@@ -471,30 +462,12 @@ __kernel void generate_blur_kernels(
 
     uint kx = kernel_offs % kernel_size;
     uint ky = kernel_offs / kernel_size;
-    // Truncating div, center of 3 == 1
-    uint kernel_center = kernel_size / 2;
 
     struct philox_thread_rng rng = rngInit(ctr + kernel_id, seed);
     float stddev = randFloatBetween(&rng, min_sigmoid, max_sigmoid);
 
-    // Small standard deviations should result in less blur, which means we
-    // should be sampling farther away from the center as we get further from
-    // the kernel size. We kinda just stretch some gaussian dist over our
-    // kernel, imagine a very wide stretch resulting in a box blur, and a very
-    // narrow stretch resulting in all the mass of the kernel ending up in the
-    // center. Divide by stddev to get desired "blurrier when bigger number"
-    // effect. 12.0 so that a stddev of 1.0 will result in a gaussian that
-    // samples from [-3, 3]
-    float sample_width = 12.0f / kernel_size / stddev;
-
-    int kx_offs = kx - kernel_center;
-    int ky_offs = ky - kernel_center;
-
-    const float norm_x_sample = sample_normal_dist(kx_offs * sample_width);
-    const float norm_y_sample = sample_normal_dist(ky_offs * sample_width);
-
     // Multiply x/y gaussians, should have same shape, volume will not be 1
-    ret[global_id] = norm_x_sample * norm_y_sample * sample_width;
+    ret[global_id] = sample_gaussian_blur_kernel(kx, ky, kernel_size, stddev);
 }
 
 __kernel void heal_orientations(
@@ -516,4 +489,43 @@ __kernel void heal_orientations(
         thread_label[5] = -thread_label[5];
     }
 
+}
+
+__kernel void flip_boxes(
+        __global float* in,
+        __global float* out,
+        uint n
+) {
+    uint global_id = get_global_id(0);
+    if (global_id >= n) return;
+
+    __global float* thread_in = in + global_id * 6;
+    __global float* thread_out = out + global_id * 6;
+
+    thread_out[0] = thread_in[0];
+    thread_out[1] = thread_in[1];
+    thread_out[2] = thread_in[2];
+    thread_out[3] = thread_in[3];
+    thread_out[4] = -thread_in[4];
+    thread_out[5] = -thread_in[5];
+
+}
+
+__kernel void box_prediction_to_box(
+    __global float* in,
+    __global float* out,
+    uint n
+) {
+    uint global_id = get_global_id(0);
+    if (global_id >= n) return;
+
+    __global float* thread_in = in + global_id * 6;
+    __global float* thread_out = out + global_id * 5;
+
+    thread_out[0] = thread_in[0];
+    thread_out[1] = thread_in[1];
+    // Dilate box a little for stage 2
+    thread_out[2] = thread_in[2] * thread_in[2] * 1.1;
+    thread_out[3] = thread_in[3] * thread_in[3] * 1.1;
+    thread_out[4] = atan2(thread_in[5], thread_in[4]);
 }

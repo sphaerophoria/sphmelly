@@ -66,6 +66,14 @@ pub fn build(b: *std.Build) void {
     });
     addCommonDependencies(b, imagegen, sphtud_mod);
 
+    const scanner = b.addExecutable(.{
+        .name = "scanner",
+        .root_source_file = b.path("src/scanner.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    addCommonDependencies(b, scanner, sphtud_mod);
+
     const conv_test_data = generateConvTestData(b);
     const bce_test_data = generateBceTestData(b);
 
@@ -88,4 +96,5 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(imagegen);
     b.installArtifact(train_output_vis);
     b.installArtifact(iou_demo);
+    b.installArtifact(scanner);
 }

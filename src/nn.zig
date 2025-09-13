@@ -527,12 +527,20 @@ pub fn runLayers(alloc: *cl.Alloc, batch: math.Executor.Tensor, layers: []const 
     return ret;
 }
 
+pub fn runLayersUntraced(alloc: *cl.Alloc, batch: math.Executor.Tensor, layers: []const Layer(math.Executor), math_executor: *math.Executor) !math.Executor.Tensor {
+    var results = batch;
+    for (layers) |layer| {
+        results = try layer.execute(alloc, math_executor, results);
+    }
+    return results;
+}
+
 pub fn Initializers(comptime Executor: type) type {
     return struct {
         he: HeInitializer(Executor),
         zero: ZeroInitializer(Executor),
 
-        pub fn resolve(self: *const @This(), config_type: Config.Initializer) Initializer(math.TracingExecutor) {
+        pub fn resolve(self: *const @This(), config_type: Config.Initializer) Initializer(Executor) {
             switch (config_type) {
                 .he => return self.he.initializer(),
                 .zero => return self.zero.initializer(),

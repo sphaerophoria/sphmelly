@@ -12,10 +12,12 @@ barcode_gen_kernel: cl.Executor.Kernel,
 sample_params_kernel: cl.Executor.Kernel,
 generate_blur_kernels_kernel: cl.Executor.Kernel,
 heal_orientations_kernel: cl.Executor.Kernel,
+box_prediction_to_box_kernel: cl.Executor.Kernel,
+flip_boxes_kernel: cl.Executor.Kernel,
 backgrounds: math.Executor.Tensor,
 background_size: u32,
 
-const barcode_gen_program_source = math.Executor.rand_program_content ++ @embedFile("BarcodeGen/generate.cl");
+const barcode_gen_program_source = math.Executor.downsample_program_content ++ math.Executor.rand_program_content ++ @embedFile("BarcodeGen/generate.cl");
 
 const BarcodeGen = @This();
 
@@ -40,6 +42,8 @@ pub fn init(scratch: sphtud.alloc.LinearAllocator, cl_alloc: *cl.Alloc, math_exe
     const sample_params_kernel = try program.createKernel(cl_alloc, "sample_barcode_params");
     const generate_blur_kernels_kernel = try program.createKernel(cl_alloc, "generate_blur_kernels");
     const heal_orientations_kernel = try program.createKernel(cl_alloc, "heal_orientations");
+    const box_prediction_to_box_kernel = try program.createKernel(cl_alloc, "box_prediction_to_box");
+    const flip_boxes_kernel = try program.createKernel(cl_alloc, "flip_boxes");
 
     const backgrounds = try makeBackgroundImgBuf(scratch, cl_alloc, math_executor, background_image_dir, img_width);
 
@@ -50,6 +54,8 @@ pub fn init(scratch: sphtud.alloc.LinearAllocator, cl_alloc: *cl.Alloc, math_exe
         .sample_params_kernel = sample_params_kernel,
         .generate_blur_kernels_kernel = generate_blur_kernels_kernel,
         .heal_orientations_kernel = heal_orientations_kernel,
+        .box_prediction_to_box_kernel = box_prediction_to_box_kernel,
+        .flip_boxes_kernel = flip_boxes_kernel,
         .backgrounds = backgrounds,
         .background_size = img_width,
     };
@@ -237,6 +243,36 @@ fn runFirstPass(self: BarcodeGen, cl_alloc: *cl.Alloc, params_buf: math.Executor
         .masks = masks,
         .imgs = imgs,
     };
+}
+
+pub fn boxPredictionToBox(self: BarcodeGen, cl_alloc: *cl.Alloc, boxes: math.Executor.Tensor) !math.Executor.Tensor {
+    if (boxes.dims.len() != 2) return error.InvalidDims;
+    if (boxes.dims.get(0) != 6) return error.InvalidDims;
+
+    const ret = try self.math_executor.createTensorUninitialized(cl_alloc, &.{ 5, boxes.dims.get(1) });
+    const n = ret.dims.get(1);
+    try self.math_executor.executor.executeKernelUntracked(cl_alloc, self.box_prediction_to_box_kernel, n, &.{
+        .{ .buf = boxes.buf },
+        .{ .buf = ret.buf },
+        .{ .uint = n },
+    });
+
+    return ret;
+}
+
+pub fn flipBoxes(self: BarcodeGen, cl_alloc: *cl.Alloc, boxes: math.Executor.Tensor) !math.Executor.Tensor {
+    if (boxes.dims.len() != 2) return error.InvalidDims;
+    if (boxes.dims.get(0) != 6) return error.InvalidDims;
+
+    const ret = try self.math_executor.createTensorUninitialized(cl_alloc, boxes.dims);
+    const n = ret.dims.get(1);
+    try self.math_executor.executor.executeKernelUntracked(cl_alloc, self.flip_boxes_kernel, n, &.{
+        .{ .buf = boxes.buf },
+        .{ .buf = ret.buf },
+        .{ .uint = n },
+    });
+
+    return ret;
 }
 
 fn makeBlurKernels(self: BarcodeGen, cl_alloc: *cl.Alloc, kernel_width: u32, num_barcodes: u32, rand_source: *math.RandSource, params: RandomizationParams) !math.Executor.Tensor {

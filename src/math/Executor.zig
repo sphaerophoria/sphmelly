@@ -20,6 +20,7 @@ pub const maxpool_program_content = @embedFile("max_pool.cl");
 pub const has_nan_program_content = @embedFile("has_nan.cl");
 pub const bce_program_content = @embedFile("bce.cl");
 pub const iou_program_content = @embedFile("iou.cl");
+pub const downsample_program_content = @embedFile("downsample.cl");
 
 matmul_kernel: cl.Executor.Kernel,
 matmul_grad_a_kernel: cl.Executor.Kernel,
@@ -53,6 +54,9 @@ maxpool_grad_kernel: cl.Executor.Kernel,
 has_nan_kernel: cl.Executor.Kernel,
 transpose_kernel: cl.Executor.Kernel,
 calc_iou_kernel: cl.Executor.Kernel,
+downsample_kernel: cl.Executor.Kernel,
+make_downsample_kernel_kernel: cl.Executor.Kernel,
+downsample_box_kernel: cl.Executor.Kernel,
 executor: *cl.Executor,
 
 pub fn init(cl_alloc: *cl.Alloc, executor: *cl.Executor) !Executor {
@@ -116,6 +120,11 @@ pub fn init(cl_alloc: *cl.Alloc, executor: *cl.Executor) !Executor {
     const iou_program = try executor.createProgram(cl_alloc, iou_program_content);
     const calc_iou_kernel = try iou_program.createKernel(cl_alloc, "calc_iou");
 
+    const downsample_program = try executor.createProgram(cl_alloc, downsample_program_content);
+    const downsample_kernel = try downsample_program.createKernel(cl_alloc, "downsample");
+    const make_downsample_kernel_kernel = try downsample_program.createKernel(cl_alloc, "make_downsample_kernel");
+    const downsample_box_kernel = try downsample_program.createKernel(cl_alloc, "downsample_box");
+
     return .{
         .matmul_kernel = matmul_kernel,
         .matmul_grad_a_kernel = matmul_grad_a_kernel,
@@ -149,6 +158,9 @@ pub fn init(cl_alloc: *cl.Alloc, executor: *cl.Executor) !Executor {
         .maxpool_grad_kernel = maxpool_grad_kernel,
         .has_nan_kernel = has_nan_kernel,
         .calc_iou_kernel = calc_iou_kernel,
+        .downsample_kernel = downsample_kernel,
+        .make_downsample_kernel_kernel = make_downsample_kernel_kernel,
+        .downsample_box_kernel = downsample_box_kernel,
         .executor = executor,
     };
 }
@@ -1059,6 +1071,85 @@ pub fn calcIou(self: Executor, cl_alloc: *cl.Alloc, as: Tensor, bs: Tensor) !Ten
         .{ .buf = bs.buf },
         .{ .buf = ret.buf },
         .{ .uint = n },
+    });
+
+    return ret;
+}
+
+pub fn downsample(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, target_size: u32) !Tensor {
+    // in: (w, h, c, n)
+    // out: (s, s, c, n)
+
+    if (in.dims.len() != 4) {
+        return error.InvalidDims;
+    }
+
+    const ret = try self.createTensorUninitialized(cl_alloc, &.{ target_size, target_size, in.dims.get(2), in.dims.get(3) });
+
+    const cp = cl_alloc.checkpoint();
+    defer cl_alloc.reset(cp);
+
+    const kernel_size = @max(in.dims.get(0), in.dims.get(1)) / target_size;
+    const kernel_size_f: f32 = @floatFromInt(kernel_size);
+    const blurry = if (kernel_size > 0) blk: {
+        const blur_kernel = try self.createTensorUninitialized(cl_alloc, &.{ kernel_size, kernel_size, 1, 1 });
+        try self.executor.executeKernelUntracked(cl_alloc, self.make_downsample_kernel_kernel, kernel_size * kernel_size, &.{
+            .{ .buf = blur_kernel.buf },
+            .{ .uint = kernel_size },
+            // Manually fiddled till images looked about right, relatively
+            // arbitrary stddev
+            .{ .float = kernel_size_f },
+        });
+
+        break :blk try self.convMany(cl_alloc, in, blur_kernel);
+    } else in;
+
+    const n = ret.dims.numElems();
+    try self.executor.executeKernelUntracked(cl_alloc, self.downsample_kernel, n, &.{
+        .{ .buf = blurry.buf },
+        .{ .buf = ret.buf },
+        .{ .uint = in.dims.get(0) },
+        .{ .uint = in.dims.get(1) },
+        .{ .uint = in.dims.get(2) },
+        .{ .uint = in.dims.get(3) },
+        .{ .uint = target_size },
+    });
+
+    return ret;
+}
+
+pub fn downsampleBox(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, boxes: Tensor, target_size: u32) !Tensor {
+    // in: (w, h, c, n)
+    // out: (s, s, c, n)
+
+    if (in.dims.len() != 4) {
+        return error.InvalidDims;
+    }
+
+    if (boxes.dims.len() != 2) {
+        return error.InvalidDims;
+    }
+
+    if (boxes.dims.get(0) != 5) {
+        return error.InvalidDims;
+    }
+
+    if (boxes.dims.get(1) != in.dims.get(3)) {
+        return error.InvalidDims;
+    }
+
+    const ret = try self.createTensorUninitialized(cl_alloc, &.{ target_size, target_size, in.dims.get(2), in.dims.get(3) });
+
+    const n = ret.dims.numElems();
+    try self.executor.executeKernelUntracked(cl_alloc, self.downsample_box_kernel, n, &.{
+        .{ .buf = in.buf },
+        .{ .buf = ret.buf },
+        .{ .buf = boxes.buf },
+        .{ .uint = in.dims.get(0) },
+        .{ .uint = in.dims.get(1) },
+        .{ .uint = in.dims.get(2) },
+        .{ .uint = in.dims.get(3) },
+        .{ .uint = target_size },
     });
 
     return ret;
