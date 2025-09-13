@@ -1058,7 +1058,7 @@ pub fn calcIou(self: Executor, cl_alloc: *cl.Alloc, as: Tensor, bs: Tensor) !Ten
     }
 
     const n = as.dims.get(1);
-    const ret = try self.createTensorUninitialized(cl_alloc, &.{16, n});
+    const ret = try self.createTensorUninitialized(cl_alloc, &.{ 16, n });
 
     try self.executor.executeKernelUntracked(cl_alloc, self.calc_iou_kernel, n, &.{
         .{ .buf = as.buf },
@@ -1078,7 +1078,7 @@ pub fn downsample(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, target_size: 
         return error.InvalidDims;
     }
 
-    const ret = try self.createTensorUninitialized(cl_alloc, &.{target_size, target_size, in.dims.get(2), in.dims.get(3)});
+    const ret = try self.createTensorUninitialized(cl_alloc, &.{ target_size, target_size, in.dims.get(2), in.dims.get(3) });
 
     const n = ret.dims.numElems();
     try self.executor.executeKernelUntracked(cl_alloc, self.downsample_kernel, n, &.{

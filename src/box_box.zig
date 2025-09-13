@@ -44,8 +44,8 @@ const Box = struct {
     r: f32,
 
     fn toCl(self: Box, cl_alloc: *cl.Alloc, executor: math.Executor) !math.Executor.Tensor {
-        const data: [5]f32 = .{self.x, self.y, std.math.sqrt(self.w), std.math.sqrt(self.h), self.r};
-        const res = try executor.createTensor(cl_alloc, &data, &.{5, 1});
+        const data: [5]f32 = .{ self.x, self.y, std.math.sqrt(self.w), std.math.sqrt(self.h), self.r };
+        const res = try executor.createTensor(cl_alloc, &data, &.{ 5, 1 });
         try res.event.wait();
 
         return res.val;
@@ -383,7 +383,7 @@ pub fn main() !void {
         var gl_buf = try sphtud.util.RuntimeBoundedArray(sphtud.render.xyt_program.Vertex).init(allocators.scratch.allocator(), 30);
 
         for (0..intersection_points.len / 2) |i| {
-            try gl_buf.append(.{ .vPos = .{ intersection_points[i * 2], intersection_points[i * 2 + 1]}});
+            try gl_buf.append(.{ .vPos = .{ intersection_points[i * 2], intersection_points[i * 2 + 1] } });
         }
         //try gl_buf.append(.{ .vPos = average });
         //for (intersection_points) |p| {
