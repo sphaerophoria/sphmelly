@@ -195,7 +195,10 @@ pub fn ImageView(comptime Action: type) type {
                 asf32(self.image.width) / asf32(widget_bounds.calcWidth()) / self.scale;
 
             self.applyDrag(input_bounds, input_state, widget_to_pixel_dist);
-            self.applyZoom(input_state);
+            if (input_bounds.containsMousePos(input_state.mouse_pos)) {
+                self.applyZoom(input_state);
+                input_state.consumeScroll();
+            }
             self.applyReset(input_state);
             return self.handleRightClick(widget_bounds, input_bounds, input_state, widget_to_pixel_dist);
         }

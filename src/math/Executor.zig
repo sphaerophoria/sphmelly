@@ -20,6 +20,7 @@ pub const maxpool_program_content = @embedFile("max_pool.cl");
 pub const has_nan_program_content = @embedFile("has_nan.cl");
 pub const bce_program_content = @embedFile("bce.cl");
 pub const iou_program_content = @embedFile("iou.cl");
+pub const downsample_program_content = @embedFile("downsample.cl");
 
 matmul_kernel: cl.Executor.Kernel,
 matmul_grad_a_kernel: cl.Executor.Kernel,
@@ -53,6 +54,7 @@ maxpool_grad_kernel: cl.Executor.Kernel,
 has_nan_kernel: cl.Executor.Kernel,
 transpose_kernel: cl.Executor.Kernel,
 calc_iou_kernel: cl.Executor.Kernel,
+downsample_kernel: cl.Executor.Kernel,
 executor: *cl.Executor,
 
 pub fn init(cl_alloc: *cl.Alloc, executor: *cl.Executor) !Executor {
@@ -116,6 +118,9 @@ pub fn init(cl_alloc: *cl.Alloc, executor: *cl.Executor) !Executor {
     const iou_program = try executor.createProgram(cl_alloc, iou_program_content);
     const calc_iou_kernel = try iou_program.createKernel(cl_alloc, "calc_iou");
 
+    const downsample_program = try executor.createProgram(cl_alloc, downsample_program_content);
+    const downsample_kernel = try downsample_program.createKernel(cl_alloc, "downsample");
+
     return .{
         .matmul_kernel = matmul_kernel,
         .matmul_grad_a_kernel = matmul_grad_a_kernel,
@@ -149,6 +154,7 @@ pub fn init(cl_alloc: *cl.Alloc, executor: *cl.Executor) !Executor {
         .maxpool_grad_kernel = maxpool_grad_kernel,
         .has_nan_kernel = has_nan_kernel,
         .calc_iou_kernel = calc_iou_kernel,
+        .downsample_kernel = downsample_kernel,
         .executor = executor,
     };
 }
@@ -1059,6 +1065,30 @@ pub fn calcIou(self: Executor, cl_alloc: *cl.Alloc, as: Tensor, bs: Tensor) !Ten
         .{ .buf = bs.buf },
         .{ .buf = ret.buf },
         .{ .uint = n },
+    });
+
+    return ret;
+}
+
+pub fn downsample(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, target_size: u32) !Tensor {
+    // in: (w, h, c, n)
+    // out: (s, s, c, n)
+
+    if (in.dims.len() != 4) {
+        return error.InvalidDims;
+    }
+
+    const ret = try self.createTensorUninitialized(cl_alloc, &.{target_size, target_size, in.dims.get(2), in.dims.get(3)});
+
+    const n = ret.dims.numElems();
+    try self.executor.executeKernelUntracked(cl_alloc, self.downsample_kernel, n, &.{
+        .{ .buf = in.buf },
+        .{ .buf = ret.buf },
+        .{ .uint = in.dims.get(0) },
+        .{ .uint = in.dims.get(1) },
+        .{ .uint = in.dims.get(2) },
+        .{ .uint = in.dims.get(3) },
+        .{ .uint = target_size },
     });
 
     return ret;
