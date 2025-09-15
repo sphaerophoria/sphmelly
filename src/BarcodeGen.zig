@@ -64,18 +64,18 @@ pub fn init(scratch: sphtud.alloc.LinearAllocator, cl_alloc: *cl.Alloc, math_exe
 pub const Bars = struct {
     imgs: math.Executor.Tensor,
     masks: math.Executor.Tensor,
-    bounding_boxes: math.Executor.Tensor,
+    box_labels: math.Executor.Tensor,
     bars: math.Executor.Tensor,
 };
 
-pub fn makeBars(self: BarcodeGen, cl_alloc: *cl.Alloc, rand_params: RandomizationParams, enable_backgrounds: bool, num_images: u32, rand_source: *math.RandSource) !Bars {
+pub fn makeBars(self: BarcodeGen, cl_alloc: *cl.Alloc, rand_params: RandomizationParams, enable_backgrounds: bool, num_images: u32, label_in_frame: bool, rand_source: *math.RandSource) !Bars {
     const out_dims = try math.TensorDims.init(cl_alloc.heap(), &.{ self.background_size, self.background_size, num_images });
 
     const num_barcodes = out_dims.get(2);
 
     const sample_buf = try self.makeSampleBuf(cl_alloc, rand_source, num_barcodes);
     const blur_kernels = try self.makeBlurKernels(cl_alloc, 5, num_barcodes, rand_source, rand_params);
-    const instanced = try self.instanceRandParams(cl_alloc, sample_buf.sample_buf, rand_source, rand_params, out_dims);
+    const instanced = try self.instanceRandParams(cl_alloc, sample_buf.sample_buf, rand_source, rand_params, out_dims, label_in_frame);
 
     const pass1_out = try self.runFirstPass(cl_alloc, instanced.params_buf, out_dims, enable_backgrounds);
     const pass2_out = try self.math_executor.maskedConv(cl_alloc, pass1_out.imgs, pass1_out.masks, blur_kernels);
@@ -83,7 +83,7 @@ pub fn makeBars(self: BarcodeGen, cl_alloc: *cl.Alloc, rand_params: Randomizatio
     return .{
         .imgs = pass2_out,
         .masks = pass1_out.masks,
-        .bounding_boxes = instanced.bounding_boxes,
+        .box_labels = instanced.box_labels,
         .bars = sample_buf.no_quiet,
     };
 }
@@ -97,6 +97,7 @@ pub fn healOrientations(self: BarcodeGen, cl_alloc: *cl.Alloc, labels: math.Exec
     try self.math_executor.executor.executeKernelUntracked(cl_alloc, self.heal_orientations_kernel, n, &.{
         .{ .buf = labels.buf },
         .{ .buf = predicted.buf },
+        .{ .uint = labels.dims.get(0) },
         .{ .uint = n },
     });
 }
@@ -129,7 +130,7 @@ fn makeSampleBuf(self: BarcodeGen, cl_alloc: *cl.Alloc, rand_source: *math.RandS
 
 const RandParams = struct {
     params_buf: math.Executor.Tensor,
-    bounding_boxes: math.Executor.Tensor,
+    box_labels: math.Executor.Tensor,
 };
 
 fn instanceRandParams(
@@ -139,14 +140,16 @@ fn instanceRandParams(
     rand_source: *math.RandSource,
     rand_params: RandomizationParams,
     dims: math.TensorDims,
+    label_in_frame: bool,
 ) !RandParams {
     const num_barcodes = dims.get(2);
     const params_struct_size = 72;
     const total_params_buf_size = params_struct_size * num_barcodes;
     const params_buf = try self.math_executor.createTensorUninitialized(cl_alloc, &.{total_params_buf_size});
 
-    // x,y,w,h,x_x,x_y per barcode
-    const bounding_boxes = try self.math_executor.createTensorUninitialized(cl_alloc, &.{ 6, num_barcodes });
+    // x,y,sqrt(w),sqrt(h),rx,ry,fully_in_frame per barcode
+    const box_label_size: u32 = if (label_in_frame) 7 else 6;
+    const box_labels = try self.math_executor.createTensorUninitialized(cl_alloc, &.{ box_label_size, num_barcodes });
 
     // This fn call may look like a disaster, but it seems better than trying
     // to coordinate struct layout between zig on host and C on GPU
@@ -158,7 +161,7 @@ fn instanceRandParams(
         // sample_buf_space,
         .{ .buf = sample_buf.buf },
         // bbox_out
-        .{ .buf = bounding_boxes.buf },
+        .{ .buf = box_labels.buf },
         // n,
         .{ .uint = num_barcodes },
         // img_width,
@@ -207,6 +210,8 @@ fn instanceRandParams(
         .{ .uint = self.backgrounds.dims.get(2) },
         // seed,
         .{ .uint = rand_source.seed },
+        // label_in_frame,
+        .{ .uint = @intFromBool(label_in_frame) },
         // ctr_start
         .{ .ulong = rand_source.ctr },
     });
@@ -214,7 +219,7 @@ fn instanceRandParams(
     rand_source.ctr += num_barcodes;
     return .{
         .params_buf = params_buf,
-        .bounding_boxes = bounding_boxes,
+        .box_labels = box_labels,
     };
 }
 
@@ -254,6 +259,7 @@ pub fn boxPredictionToBox(self: BarcodeGen, cl_alloc: *cl.Alloc, boxes: math.Exe
     try self.math_executor.executor.executeKernelUntracked(cl_alloc, self.box_prediction_to_box_kernel, n, &.{
         .{ .buf = boxes.buf },
         .{ .buf = ret.buf },
+        .{ .uint = boxes.dims.get(0) },
         .{ .uint = n },
     });
 
@@ -269,6 +275,7 @@ pub fn flipBoxes(self: BarcodeGen, cl_alloc: *cl.Alloc, boxes: math.Executor.Ten
     try self.math_executor.executor.executeKernelUntracked(cl_alloc, self.flip_boxes_kernel, n, &.{
         .{ .buf = boxes.buf },
         .{ .buf = ret.buf },
+        .{ .uint = boxes.dims.get(0) },
         .{ .uint = n },
     });
 

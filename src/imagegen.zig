@@ -61,6 +61,7 @@ const ImageUpdater = struct {
     solid_color_renderer: *sphrender.xyt_program.SolidColorProgram,
     visualize_mask: bool,
     config: Config,
+    in_frame: *bool,
 
     seed: u64,
     selected_image: usize = 0,
@@ -114,6 +115,7 @@ const ImageUpdater = struct {
             self.config.data.rand_params,
             true,
             self.config.data.batch_size,
+            self.config.data.label_in_frame,
             &rand_source,
         );
 
@@ -134,15 +136,19 @@ const ImageUpdater = struct {
 
         {
             // Take bars for image we are visualizing
-            const box_slice = try bars.bounding_boxes.indexOuter(self.selected_image);
+            const box_slice = try bars.box_labels.indexOuter(self.selected_image);
             const res = try self.math_executor.sliceToCpuDeferred(self.scratch, self.cl_alloc, box_slice);
             try res.event.wait();
 
-            const render_source = try tsv.makeBBoxGLBuffer(self.scratch_gl, res.val, self.solid_color_renderer);
+            const render_source = try tsv.makeBBoxGLBuffer(self.scratch_gl, res.val[0..6], self.solid_color_renderer);
             self.solid_color_renderer.renderLineStrip(render_source, .{
                 .color = .{ 0.0, 0.0, 1.0 },
                 .transform = sphtud.math.Transform.identity.inner,
             });
+
+            if (self.config.data.label_in_frame) {
+                self.in_frame.* = res.val[6] > 0.5;
+            }
         }
     }
 };
@@ -213,9 +219,19 @@ const Args = struct {
 const Config = struct {
     data: struct {
         batch_size: u32,
+        label_in_frame: bool,
         img_size: u32,
         rand_params: BarcodeGen.RandomizationParams,
     },
+};
+
+const InFrameLabelRetriever = struct {
+    in_frame: *bool,
+    buf: [20]u8 = undefined,
+
+    pub fn getText(self: *InFrameLabelRetriever) []const u8 {
+        return std.fmt.bufPrint(&self.buf, "in frame: {}", .{self.in_frame.*}) catch unreachable;
+    }
 };
 
 pub fn main() !void {
@@ -267,6 +283,7 @@ pub fn main() !void {
         .onReqStat = &GuiAction.generateRequestImageStat,
     };
 
+    var in_frame: bool = true;
     var image_view_updater = ImageUpdater{
         .barcode_gen = &barcode_gen,
         .cl_alloc = &cl_alloc,
@@ -278,6 +295,7 @@ pub fn main() !void {
         .config = config,
         .seed = 0,
         .visualize_mask = false,
+        .in_frame = &in_frame,
     };
 
     try image_view_updater.update();
@@ -295,6 +313,7 @@ pub fn main() !void {
     try layout.pushWidget(try widget_factory.makeDrag(usize, &image_view_updater.selected_image, &GuiAction.generateSelectedImage, 1, 5));
     try layout.pushWidget(try widget_factory.makeLabel("Visualize mask"));
     try layout.pushWidget(try widget_factory.makeCheckbox(&image_view_updater.visualize_mask, GuiAction.toggle_mask));
+    try layout.pushWidget(try widget_factory.makeLabel(InFrameLabelRetriever{ .in_frame = &in_frame }));
 
     try layout.pushWidget(image_view.asWidget());
 

@@ -458,12 +458,12 @@ const TrainingInput = struct {
     expected: math.Executor.Tensor,
 };
 
-fn generateTrainingInput(cl_alloc: *cl.Alloc, barcode_gen: *BarcodeGen, rand_params: BarcodeGen.RandomizationParams, math_executor: math.Executor, rand_source: *math.RandSource, _: *TrainNotifier, train_num_images: u32, barcode_size: u32, enable_backgrounds: bool, target: Config.TrainTarget) !TrainingInput {
-    const bars = try barcode_gen.makeBars(cl_alloc, rand_params, enable_backgrounds, train_num_images, rand_source);
+fn generateTrainingInput(cl_alloc: *cl.Alloc, barcode_gen: *BarcodeGen, rand_params: BarcodeGen.RandomizationParams, math_executor: math.Executor, rand_source: *math.RandSource, _: *TrainNotifier, train_num_images: u32, barcode_size: u32, enable_backgrounds: bool, label_in_frame: bool, target: Config.TrainTarget) !TrainingInput {
+    const bars = try barcode_gen.makeBars(cl_alloc, rand_params, enable_backgrounds, train_num_images, label_in_frame, rand_source);
 
     const batch_cl_4d = try math_executor.reshape(cl_alloc, bars.imgs, &.{ barcode_size, barcode_size, 1, train_num_images });
     const expected = switch (target) {
-        .bbox => bars.bounding_boxes,
+        .bbox => bars.box_labels,
         .bars => bars.bars,
     };
 
@@ -553,6 +553,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
         config.val_size,
         config.data.img_size,
         config.data.enable_backgrounds,
+        config.data.label_in_frame,
         config.train_target,
     );
 
@@ -587,6 +588,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                     config.data.batch_size,
                     config.data.img_size,
                     config.data.enable_backgrounds,
+                    config.data.label_in_frame,
                     config.train_target,
                 );
 
@@ -604,7 +606,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                 const loss = blk: switch (config.train_target) {
                     .bbox => {
                         const even_loss = try tracing_executor.squaredErr(&cl_alloc, results[results.len - 1], traced_expected);
-                        const loss_multipliers = try math_executor.createTensorUntracked(&cl_alloc, config.loss_multipliers, &.{6});
+                        const loss_multipliers = try math_executor.createTensorUntracked(&cl_alloc, config.loss_multipliers, &.{@intCast(config.loss_multipliers.len)});
                         break :blk try tracing_executor.elemMul(&cl_alloc, even_loss, loss_multipliers);
                     },
                     .bars => try tracing_executor.bceWithLogits(&cl_alloc, results[results.len - 1], traced_expected),
@@ -629,14 +631,15 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                     const loss_cpu = try tracing_executor.toCpu(cl_alloc.heap(), &cl_alloc, loss);
                     switch (config.train_target) {
                         .bbox => {
-                            var total_losses: [6]f32 = @splat(0);
-                            for (0..loss_cpu.len / 6) |i| {
-                                for (0..6) |j| {
-                                    total_losses[j] += loss_cpu[i * 6 + j];
+                            const num_predictions: u32 = if (config.data.label_in_frame) 7 else 6;
+                            var total_losses: [7]f32 = @splat(0);
+                            for (0..loss_cpu.len / num_predictions) |i| {
+                                for (0..num_predictions) |j| {
+                                    total_losses[j] += loss_cpu[i * num_predictions + j];
                                 }
                             }
 
-                            const labels: []const []const u8 = &.{ "dx", "dy", "dw", "dh", "drx", "dry" };
+                            const labels: []const []const u8 = &.{ "dx", "dy", "dw", "dh", "drx", "dry", "in_frame" };
                             for (total_losses, labels) |total_loss, label| {
                                 try log_writer.print("{s} loss,{d}\n", .{ label, total_loss });
                             }
@@ -659,13 +662,14 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                                     total_val_mse += l * l;
                                 }
 
-                                std.debug.assert(val_err.dims.get(0) == 6);
+                                std.debug.assert(val_err.dims.get(0) == num_predictions);
                                 std.debug.assert(val_err.dims.len() == 2);
-                                var totals: [6]f32 = @splat(0);
-                                var sum_squares: [6]f32 = @splat(0);
-                                for (0..val_err_cpu.len / 6) |i| {
-                                    for (0..6) |j| {
-                                        const val = val_err_cpu[i * 6 + j];
+
+                                var totals: [7]f32 = @splat(0);
+                                var sum_squares: [7]f32 = @splat(0);
+                                for (0..val_err_cpu.len / num_predictions) |i| {
+                                    for (0..num_predictions) |j| {
+                                        const val = val_err_cpu[i * num_predictions + j];
                                         totals[j] += @abs(val);
                                         sum_squares[j] += val * val;
                                     }

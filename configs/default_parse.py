@@ -10,6 +10,7 @@ config = {
     "data": {
         "batch_size": batch_size,
         "img_size": img_size,
+        "label_in_frame": False,
         "rand_params": {
             "x_offs_range": [ -20, 20 ],
             "y_offs_range": [ -20, 20 ],

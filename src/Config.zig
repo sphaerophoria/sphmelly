@@ -5,6 +5,7 @@ const Config = @This();
 
 data: struct {
     batch_size: u32,
+    label_in_frame: bool,
     img_size: u32,
     rand_params: BarcodeGen.RandomizationParams,
     enable_backgrounds: bool,

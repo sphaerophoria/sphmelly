@@ -242,13 +242,19 @@ struct concrete_params {
     float background_color;
 };
 
+bool pointIsNormalized(float2 point) {
+    return
+        point[0] >= 0.0f && point[0] <= 1.0f &&
+        point[1] >= 0.0f && point[1] <= 1.0f;
+}
+
 __kernel void sample_barcode_params(
     __global struct concrete_params* ret,
     uint expected_concrete_params_size,
     // size of barcode * n
     __global float* sample_buf_space,
     // Explicit separated output for training labels
-    __global float* bbox_out,
+    __global float* box_labels_out,
     uint n,
     uint img_width,
     uint img_height,
@@ -273,6 +279,7 @@ __kernel void sample_barcode_params(
     float max_background_color,
     uint num_images,
     uint seed,
+    uint label_in_frame,
     ulong ctr_start
 ) {
 
@@ -327,12 +334,39 @@ __kernel void sample_barcode_params(
         .background_color = background_color,
     };
 
-    bbox_out[global_id * 6 + 0] = x_offs / (float)img_width;
-    bbox_out[global_id * 6 + 1] = y_offs / (float)img_height;
-    bbox_out[global_id * 6 + 2] = sqrt(x_scale);
-    bbox_out[global_id * 6 + 3] = sqrt(y_scale);
-    bbox_out[global_id * 6 + 4] = cos(rot);
-    bbox_out[global_id * 6 + 5] = sin(rot);
+
+    float2 box_x_axis = {cos(rot), sin(rot)};
+
+    uint label_stride = (label_in_frame) ? 7 : 6;
+    box_labels_out[global_id * label_stride + 0] = x_offs / (float)img_width;
+    box_labels_out[global_id * label_stride + 1] = y_offs / (float)img_height;
+    box_labels_out[global_id * label_stride + 2] = sqrt(x_scale);
+    box_labels_out[global_id * label_stride + 3] = sqrt(y_scale);
+    box_labels_out[global_id * label_stride + 4] = box_x_axis[0];
+    box_labels_out[global_id * label_stride + 5] = box_x_axis[1];
+
+    if (label_in_frame) {
+        float2 box_y_axis = {-box_x_axis[1], box_x_axis[0]};
+
+        // Non-square probably breaks in frame check
+        float2 center = {
+            x_offs / (float)img_width + 0.5,
+            y_offs / (float)img_height + 0.5,
+        };
+
+        float2 tl = center - box_x_axis * x_scale / 2.0f - box_y_axis * y_scale / 2.0f;
+        float2 tr = center + box_x_axis * x_scale / 2.0f - box_y_axis * y_scale / 2.0f;
+        float2 bl = center - box_x_axis * x_scale / 2.0f + box_y_axis * y_scale / 2.0f;
+        float2 br = center + box_x_axis * x_scale / 2.0f + box_y_axis * y_scale / 2.0f;
+
+        bool fully_in_frame =
+            pointIsNormalized(tl) &&
+            pointIsNormalized(tr) &&
+            pointIsNormalized(bl) &&
+            pointIsNormalized(br);
+
+        box_labels_out[global_id * label_stride + 6] = fully_in_frame;
+    }
 }
 
 bool multisample_barcode(
@@ -405,7 +439,7 @@ __kernel void generate_barcode(
     float barcode_cy_img = image_cy + our_params.y_offs;
 
     float barcode_width = (float)width * our_params.x_scale;
-    float barcode_height = (float)height * our_params.y_scale;
+    float barcode_height = (float)width * our_params.y_scale;
 
     float barcode_cx_barcode = barcode_width / 2.0;
     float barcode_cy_barcode = barcode_height / 2.0;
@@ -473,13 +507,14 @@ __kernel void generate_blur_kernels(
 __kernel void heal_orientations(
         __global float* labels,
         __global float* predictions,
+        uint label_stride,
         uint n
 ) {
     uint global_id = get_global_id(0);
     if (global_id >= n) return;
 
-    __global float* thread_label = labels + global_id * 6;
-    __global float* thread_prediction = predictions + global_id * 6;
+    __global float* thread_label = labels + global_id * label_stride;
+    __global float* thread_prediction = predictions + global_id * label_stride;
 
     float2 label_orientation = {thread_label[4], thread_label[5]};
     float2 prediction_orientation = {thread_prediction[4], thread_prediction[5]};
@@ -494,13 +529,14 @@ __kernel void heal_orientations(
 __kernel void flip_boxes(
         __global float* in,
         __global float* out,
+        uint label_stride,
         uint n
 ) {
     uint global_id = get_global_id(0);
     if (global_id >= n) return;
 
-    __global float* thread_in = in + global_id * 6;
-    __global float* thread_out = out + global_id * 6;
+    __global float* thread_in = in + global_id * label_stride;
+    __global float* thread_out = out + global_id * label_stride;
 
     thread_out[0] = thread_in[0];
     thread_out[1] = thread_in[1];
@@ -508,18 +544,22 @@ __kernel void flip_boxes(
     thread_out[3] = thread_in[3];
     thread_out[4] = -thread_in[4];
     thread_out[5] = -thread_in[5];
+    for (uint i = 6; i < label_stride; i++) {
+        thread_out[i] = thread_in[i];
+    }
 
 }
 
 __kernel void box_prediction_to_box(
     __global float* in,
     __global float* out,
+    uint in_label_stride,
     uint n
 ) {
     uint global_id = get_global_id(0);
     if (global_id >= n) return;
 
-    __global float* thread_in = in + global_id * 6;
+    __global float* thread_in = in + global_id * in_label_stride;
     __global float* thread_out = out + global_id * 5;
 
     thread_out[0] = thread_in[0];
