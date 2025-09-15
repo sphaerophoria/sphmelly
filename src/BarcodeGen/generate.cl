@@ -240,6 +240,7 @@ struct concrete_params {
     float dark_color;
     float light_color;
     float background_color;
+    bool should_render_code;
 };
 
 bool pointIsNormalized(float2 point) {
@@ -277,6 +278,7 @@ __kernel void sample_barcode_params(
     float max_y_noise_multiplier,
     float min_background_color,
     float max_background_color,
+    float no_code_prob,
     uint num_images,
     uint seed,
     uint label_in_frame,
@@ -312,6 +314,8 @@ __kernel void sample_barcode_params(
 
     float background_color = randFloatBetween(&rng, min_background_color, max_background_color);
 
+    bool should_render_code = randFloatBetween(&rng, 0.0f, 1.0f) > no_code_prob;
+
     __global float* sample_buf = sample_buf_space + global_id * BARCODE_NUM_MODULES;
     uint image_idx = randUlongBetween(&rng, 0, num_images);
 
@@ -332,40 +336,54 @@ __kernel void sample_barcode_params(
         .dark_color = dark_color,
         .light_color = light_color,
         .background_color = background_color,
+        .should_render_code = should_render_code,
     };
 
 
     float2 box_x_axis = {cos(rot), sin(rot)};
 
     uint label_stride = (label_in_frame) ? 7 : 6;
-    box_labels_out[global_id * label_stride + 0] = x_offs / (float)img_width;
-    box_labels_out[global_id * label_stride + 1] = y_offs / (float)img_height;
-    box_labels_out[global_id * label_stride + 2] = sqrt(x_scale);
-    box_labels_out[global_id * label_stride + 3] = sqrt(y_scale);
-    box_labels_out[global_id * label_stride + 4] = box_x_axis[0];
-    box_labels_out[global_id * label_stride + 5] = box_x_axis[1];
+    if (should_render_code) {
+        box_labels_out[global_id * label_stride + 0] = x_offs / (float)img_width;
+        box_labels_out[global_id * label_stride + 1] = y_offs / (float)img_height;
+        box_labels_out[global_id * label_stride + 2] = sqrt(x_scale);
+        box_labels_out[global_id * label_stride + 3] = sqrt(y_scale);
+        box_labels_out[global_id * label_stride + 4] = box_x_axis[0];
+        box_labels_out[global_id * label_stride + 5] = box_x_axis[1];
 
-    if (label_in_frame) {
-        float2 box_y_axis = {-box_x_axis[1], box_x_axis[0]};
+        if (label_in_frame) {
+            float2 box_y_axis = {-box_x_axis[1], box_x_axis[0]};
 
-        // Non-square probably breaks in frame check
-        float2 center = {
-            x_offs / (float)img_width + 0.5,
-            y_offs / (float)img_height + 0.5,
-        };
+            // Non-square probably breaks in frame check
+            float2 center = {
+                x_offs / (float)img_width + 0.5,
+                y_offs / (float)img_height + 0.5,
+            };
 
-        float2 tl = center - box_x_axis * x_scale / 2.0f - box_y_axis * y_scale / 2.0f;
-        float2 tr = center + box_x_axis * x_scale / 2.0f - box_y_axis * y_scale / 2.0f;
-        float2 bl = center - box_x_axis * x_scale / 2.0f + box_y_axis * y_scale / 2.0f;
-        float2 br = center + box_x_axis * x_scale / 2.0f + box_y_axis * y_scale / 2.0f;
+            float2 tl = center - box_x_axis * x_scale / 2.0f - box_y_axis * y_scale / 2.0f;
+            float2 tr = center + box_x_axis * x_scale / 2.0f - box_y_axis * y_scale / 2.0f;
+            float2 bl = center - box_x_axis * x_scale / 2.0f + box_y_axis * y_scale / 2.0f;
+            float2 br = center + box_x_axis * x_scale / 2.0f + box_y_axis * y_scale / 2.0f;
 
-        bool fully_in_frame =
-            pointIsNormalized(tl) &&
-            pointIsNormalized(tr) &&
-            pointIsNormalized(bl) &&
-            pointIsNormalized(br);
+            bool fully_in_frame =
+                pointIsNormalized(tl) &&
+                pointIsNormalized(tr) &&
+                pointIsNormalized(bl) &&
+                pointIsNormalized(br);
 
-        box_labels_out[global_id * label_stride + 6] = fully_in_frame;
+            box_labels_out[global_id * label_stride + 6] = fully_in_frame;
+        }
+    } else {
+        box_labels_out[global_id * label_stride + 0] = 0.0f;
+        box_labels_out[global_id * label_stride + 1] = 0.0f;
+        box_labels_out[global_id * label_stride + 2] = 0.0f;
+        box_labels_out[global_id * label_stride + 3] = 0.0f;
+        box_labels_out[global_id * label_stride + 4] = 0.0f;
+        box_labels_out[global_id * label_stride + 5] = 0.0f;
+
+        if (label_in_frame) {
+            box_labels_out[global_id * label_stride + 6] = 0.0f;
+        }
     }
 }
 
@@ -422,6 +440,10 @@ __kernel void generate_barcode(
     ret[global_id] = (enable_backgrounds)
         ? background_buf[our_params.img_idx * width * height + pixel_id]
         : our_params.background_color;
+
+    if (!our_params.should_render_code) {
+        return;
+    }
 
     float crot = cos(our_params.rot);
     float srot = sin(our_params.rot);

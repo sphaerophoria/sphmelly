@@ -23,6 +23,7 @@ config = {
             "perlin_grid_size_range": [ 1, 100 ],
             "background_color_range": [ 0.0, 1.0 ],
             "blur_stddev_range": [ 0.0001, 9.0 ],
+            "no_code_prob": 0.0,
         },
         "enable_backgrounds": True,
     },

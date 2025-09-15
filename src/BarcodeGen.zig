@@ -33,6 +33,7 @@ pub const RandomizationParams = struct {
     y_noise_multiplier_range: [2]f32,
     background_color_range: [2]f32,
     blur_stddev_range: [2]f32,
+    no_code_prob: f32,
 };
 
 pub fn init(scratch: sphtud.alloc.LinearAllocator, cl_alloc: *cl.Alloc, math_executor: math.Executor, background_image_dir: []const u8, img_width: u32) !BarcodeGen {
@@ -206,6 +207,8 @@ fn instanceRandParams(
         .{ .float = rand_params.background_color_range[0] },
         // max_background_color,
         .{ .float = rand_params.background_color_range[1] },
+        // no_code_prob,
+        .{ .float = rand_params.no_code_prob },
         // num_images
         .{ .uint = self.backgrounds.dims.get(2) },
         // seed,
