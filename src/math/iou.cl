@@ -35,7 +35,7 @@ float2 line_line_intersection(struct line l1, struct line l2) {
     return a + r * t;
 }
 
-struct box box_from_data_repr(__global float* data) {
+struct box box_from_data_repr(float* data) {
     // Takes cx,cy,w,h,r
     // Returns corner points
     float half_w = data[2] / 2.0f;
@@ -63,8 +63,10 @@ struct box box_from_data_repr(__global float* data) {
     };
 }
 
-float box_area_from_data_repr(__global float* data) {
-    return data[2] * data[3];
+float box_area(struct box box) {
+    float width = distance(box.tl, box.tr);
+    float height = distance(box.tl, box.bl);
+    return width * height;
 }
 
 // Growable array of points, up to 8 which is the max for 2
@@ -210,6 +212,33 @@ float poly_fan_tri_area(struct poly_fan_tri tri) {
         );
 }
 
+float calc_iou_inner(
+    struct box a_box,
+    struct box b_box
+) {
+    struct intersection_polygon poly = calc_intersection(a_box, b_box);
+
+    struct poly_fan_iter it;
+    poly_fan_iter_init(&it, &poly);
+
+    float a_area = box_area(a_box);
+    float b_area = box_area(b_box);
+
+    const float eps = 1e-9;
+    if (a_area < eps || b_area < eps) {
+        return 0;
+    }
+
+    float intersection_area = 0.0f;
+    while (poly_fan_iter_next(&it)) {
+        struct poly_fan_tri tri = poly_fan_iter_triangle(&it);
+        intersection_area += poly_fan_tri_area(tri);
+    }
+
+    float union_area = box_area(a_box) + box_area(b_box) - intersection_area;
+    return intersection_area / union_area;
+}
+
 __kernel void calc_iou(
     __global float* as,
     __global float* bs,
@@ -229,17 +258,5 @@ __kernel void calc_iou(
     struct box a_box = box_from_data_repr(in_a);
     struct box b_box = box_from_data_repr(in_b);
 
-    struct intersection_polygon poly = calc_intersection(a_box, b_box);
-
-    struct poly_fan_iter it;
-    poly_fan_iter_init(&it, &poly);
-
-    float intersection_area = 0.0f;
-    while (poly_fan_iter_next(&it)) {
-        struct poly_fan_tri tri = poly_fan_iter_triangle(&it);
-        intersection_area += poly_fan_tri_area(tri);
-    }
-
-    float union_area = box_area_from_data_repr(in_a) + box_area_from_data_repr(in_b) - intersection_area;
-    out[global_id] = intersection_area / union_area;
+    out[global_id] = calc_iou_inner(a_box, b_box);
 }

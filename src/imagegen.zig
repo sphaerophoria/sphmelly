@@ -111,12 +111,15 @@ const ImageUpdater = struct {
         };
 
         const bars = try self.barcode_gen.makeBars(
-            self.cl_alloc,
-            self.config.data.rand_params,
-            true,
-            self.config.data.batch_size,
-            self.config.data.label_in_frame,
-            &rand_source,
+            .{
+                .cl_alloc = self.cl_alloc,
+                .rand_params = self.config.data.rand_params,
+                .enable_backgrounds = true,
+                .num_images = self.config.data.batch_size,
+                .label_in_frame = self.config.data.label_in_frame,
+                .label_iou = self.config.data.label_iou,
+                .rand_source = &rand_source,
+            },
         );
 
         try self.math_executor.executor.finish();
@@ -220,6 +223,7 @@ const Config = struct {
     data: struct {
         batch_size: u32,
         label_in_frame: bool,
+        label_iou: bool,
         img_size: u32,
         rand_params: BarcodeGen.RandomizationParams,
     },

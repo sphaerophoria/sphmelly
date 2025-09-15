@@ -11,6 +11,7 @@ config = {
         "batch_size": batch_size,
         "img_size": img_size,
         "label_in_frame": False,
+        "label_iou": False,
         "rand_params": {
             "x_offs_range": [ -20, 20 ],
             "y_offs_range": [ -20, 20 ],

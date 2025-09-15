@@ -458,10 +458,10 @@ const TrainingInput = struct {
     expected: math.Executor.Tensor,
 };
 
-fn generateTrainingInput(cl_alloc: *cl.Alloc, barcode_gen: *BarcodeGen, rand_params: BarcodeGen.RandomizationParams, math_executor: math.Executor, rand_source: *math.RandSource, _: *TrainNotifier, train_num_images: u32, barcode_size: u32, enable_backgrounds: bool, label_in_frame: bool, target: Config.TrainTarget) !TrainingInput {
-    const bars = try barcode_gen.makeBars(cl_alloc, rand_params, enable_backgrounds, train_num_images, label_in_frame, rand_source);
+fn generateTrainingInput(barcode_gen: *BarcodeGen, make_bars_params: BarcodeGen.MakeBarsParams, math_executor: math.Executor, target: Config.TrainTarget, barcode_size: u32) !TrainingInput {
+    const bars = try barcode_gen.makeBars(make_bars_params);
 
-    const batch_cl_4d = try math_executor.reshape(cl_alloc, bars.imgs, &.{ barcode_size, barcode_size, 1, train_num_images });
+    const batch_cl_4d = try math_executor.reshape(make_bars_params.cl_alloc, bars.imgs, &.{ barcode_size, barcode_size, 1, make_bars_params.num_images });
     const expected = switch (target) {
         .bbox => bars.box_labels,
         .bars => bars.bars,
@@ -544,17 +544,19 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
     } = .unpaused;
 
     const validation_set = try generateTrainingInput(
-        &cl_alloc,
         &barcode_gen,
-        config.data.rand_params,
+        .{
+            .cl_alloc = &cl_alloc,
+            .rand_params = config.data.rand_params,
+            .rand_source = &rand_source,
+            .num_images = config.val_size,
+            .label_in_frame = config.data.label_in_frame,
+            .label_iou = config.data.label_iou,
+            .enable_backgrounds = config.data.enable_backgrounds,
+        },
         math_executor,
-        &rand_source,
-        &notifier,
-        config.val_size,
-        config.data.img_size,
-        config.data.enable_backgrounds,
-        config.data.label_in_frame,
         config.train_target,
+        config.data.img_size,
     );
 
     var iter: usize = 0;
@@ -579,17 +581,19 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                 cl_alloc.reset(cl_alloc_checkpoint);
 
                 const train_input = try generateTrainingInput(
-                    &cl_alloc,
                     &barcode_gen,
-                    config.data.rand_params,
+                    .{
+                        .cl_alloc = &cl_alloc,
+                        .rand_params = config.data.rand_params,
+                        .rand_source = &rand_source,
+                        .num_images = config.data.batch_size,
+                        .label_in_frame = config.data.label_in_frame,
+                        .label_iou = config.data.label_iou,
+                        .enable_backgrounds = config.data.enable_backgrounds,
+                    },
                     math_executor,
-                    &rand_source,
-                    &notifier,
-                    config.data.batch_size,
-                    config.data.img_size,
-                    config.data.enable_backgrounds,
-                    config.data.label_in_frame,
                     config.train_target,
+                    config.data.img_size,
                 );
 
                 const results = try nn.runLayers(&cl_alloc, train_input.input, layers, &tracing_executor);
@@ -597,7 +601,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                 try notifier.predictionsQueued(results[results.len - 1]);
 
                 if (config.train_target == .bbox) {
-                    try barcode_gen.healOrientations(&cl_alloc, train_input.expected, tracing_executor.getClTensor(results[results.len - 1].buf));
+                    try barcode_gen.healBboxLabels(&cl_alloc, train_input.expected, tracing_executor.getClTensor(results[results.len - 1].buf), config.data.label_iou);
                 }
                 try notifier.batchGenerationQueued(train_input.bars.imgs, train_input.expected);
 
@@ -631,16 +635,23 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                     const loss_cpu = try tracing_executor.toCpu(cl_alloc.heap(), &cl_alloc, loss);
                     switch (config.train_target) {
                         .bbox => {
-                            const num_predictions: u32 = if (config.data.label_in_frame) 7 else 6;
-                            var total_losses: [7]f32 = @splat(0);
+                            const num_predictions: u32 = @as(u32, 6) + @intFromBool(config.data.label_iou) + @intFromBool(config.data.label_in_frame);
+
+                            const max_num_predictions = 8;
+                            var total_losses: [max_num_predictions]f32 = @splat(0);
                             for (0..loss_cpu.len / num_predictions) |i| {
                                 for (0..num_predictions) |j| {
                                     total_losses[j] += loss_cpu[i * num_predictions + j];
                                 }
                             }
 
-                            const labels: []const []const u8 = &.{ "dx", "dy", "dw", "dh", "drx", "dry", "in_frame" };
-                            for (total_losses, labels) |total_loss, label| {
+                            if (config.data.label_iou) {
+                                // Don't want to deal with label ordering problems
+                                std.debug.assert(config.data.label_in_frame);
+                            }
+
+                            const labels: [max_num_predictions][]const u8 = .{ "dx", "dy", "dw", "dh", "drx", "dry", "in_frame", "iou" };
+                            for (total_losses, &labels) |total_loss, label| {
                                 try log_writer.print("{s} loss,{d}\n", .{ label, total_loss });
                             }
                             var total_loss: f32 = 0;
@@ -652,7 +663,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                             if (iter % config.val_freq == 0) {
                                 const val_results = try nn.runLayers(&cl_alloc, validation_set.input, layers, &tracing_executor);
 
-                                try barcode_gen.healOrientations(&cl_alloc, validation_set.expected, tracing_executor.getClTensor(val_results[val_results.len - 1].buf));
+                                try barcode_gen.healBboxLabels(&cl_alloc, validation_set.expected, tracing_executor.getClTensor(val_results[val_results.len - 1].buf), config.data.label_iou);
 
                                 const val_err = try math_executor.sub(&cl_alloc, tracing_executor.getClTensor(val_results[val_results.len - 1].buf), validation_set.expected);
 
@@ -665,8 +676,8 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                                 std.debug.assert(val_err.dims.get(0) == num_predictions);
                                 std.debug.assert(val_err.dims.len() == 2);
 
-                                var totals: [7]f32 = @splat(0);
-                                var sum_squares: [7]f32 = @splat(0);
+                                var totals: [max_num_predictions]f32 = @splat(0);
+                                var sum_squares: [max_num_predictions]f32 = @splat(0);
                                 for (0..val_err_cpu.len / num_predictions) |i| {
                                     for (0..num_predictions) |j| {
                                         const val = val_err_cpu[i * num_predictions + j];

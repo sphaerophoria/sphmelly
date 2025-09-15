@@ -282,6 +282,7 @@ __kernel void sample_barcode_params(
     uint num_images,
     uint seed,
     uint label_in_frame,
+    uint label_iou,
     ulong ctr_start
 ) {
 
@@ -342,7 +343,21 @@ __kernel void sample_barcode_params(
 
     float2 box_x_axis = {cos(rot), sin(rot)};
 
-    uint label_stride = (label_in_frame) ? 7 : 6;
+    uint label_stride = 6;
+
+    uint in_frame_idx = 0;
+    uint iou_idx = 0;
+
+    if (label_in_frame) {
+        in_frame_idx = label_stride;
+        label_stride += 1;
+    }
+
+    if (label_iou) {
+        iou_idx = label_stride;
+        label_stride += 1;
+    }
+
     if (should_render_code) {
         box_labels_out[global_id * label_stride + 0] = x_offs / (float)img_width;
         box_labels_out[global_id * label_stride + 1] = y_offs / (float)img_height;
@@ -371,7 +386,11 @@ __kernel void sample_barcode_params(
                 pointIsNormalized(bl) &&
                 pointIsNormalized(br);
 
-            box_labels_out[global_id * label_stride + 6] = fully_in_frame;
+            box_labels_out[global_id * label_stride + in_frame_idx] = fully_in_frame;
+        }
+
+        if (label_iou) {
+            box_labels_out[global_id * label_stride + iou_idx] = 0;
         }
     } else {
         box_labels_out[global_id * label_stride + 0] = 0.0f;
@@ -382,7 +401,11 @@ __kernel void sample_barcode_params(
         box_labels_out[global_id * label_stride + 5] = 0.0f;
 
         if (label_in_frame) {
-            box_labels_out[global_id * label_stride + 6] = 0.0f;
+            box_labels_out[global_id * label_stride + in_frame_idx] = 0.0f;
+        }
+
+        if (label_iou) {
+            box_labels_out[global_id * label_stride + iou_idx] = 0.0f;
         }
     }
 }
@@ -530,6 +553,7 @@ __kernel void heal_orientations(
         __global float* labels,
         __global float* predictions,
         uint label_stride,
+        uint predict_iou,
         uint n
 ) {
     uint global_id = get_global_id(0);
@@ -546,6 +570,28 @@ __kernel void heal_orientations(
         thread_label[5] = -thread_label[5];
     }
 
+    if (predict_iou) {
+        float common_repr_a[5] = {
+            thread_label[0],
+            thread_label[1],
+            thread_label[2] * thread_label[2],
+            thread_label[3] * thread_label[3],
+            atan2(thread_label[5], thread_label[4])
+        };
+
+        float common_repr_b[5] = {
+            thread_prediction[0],
+            thread_prediction[1],
+            thread_prediction[2] * thread_prediction[2],
+            thread_prediction[3] * thread_prediction[3],
+            atan2(thread_prediction[5], thread_prediction[4])
+        };
+        struct box box_a = box_from_data_repr(common_repr_a);
+        struct box box_b = box_from_data_repr(common_repr_b);
+
+        uint iou_idx = label_stride - 1;
+        thread_label[iou_idx] = calc_iou_inner(box_a, box_b);
+    }
 }
 
 __kernel void flip_boxes(
