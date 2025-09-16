@@ -9,6 +9,7 @@ data: struct {
     label_iou: bool,
     img_size: u32,
     rand_params: BarcodeGen.RandomizationParams,
+    val_rand_params: BarcodeGen.RandomizationParams,
     enable_backgrounds: bool,
 },
 log_freq: u32,

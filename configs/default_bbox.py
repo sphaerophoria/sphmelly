@@ -6,26 +6,28 @@ import math
 batch_size = 64;
 img_size = 256 * 0.75
 conv_end_size = img_size / 16 * img_size / 16 * 4;
+rand_params = {
+    "x_offs_range": [ -40, 40 ],
+    "y_offs_range": [ -40, 40 ],
+    "x_scale_range": [ 0.40, 0.60 ],
+    "rot_range": [ -math.pi, math.pi ],
+    "aspect_range": [ 0.4, 1.0 ],
+    "min_contrast": 0.5,
+    "x_noise_multiplier_range": [ 0, 0 ],
+    "y_noise_multiplier_range": [ 0, 0 ],
+    "perlin_grid_size_range": [ 10, 100 ],
+    "background_color_range": [ 0.0, 1.0 ],
+    "blur_stddev_range": [ 0.0001, 0.15 ],
+    "no_code_prob": 0.0,
+}
 config = {
     "data": {
         "batch_size": batch_size,
         "img_size": img_size,
         "label_in_frame": False,
         "label_iou": False,
-        "rand_params": {
-            "x_offs_range": [ -40, 40 ],
-            "y_offs_range": [ -40, 40 ],
-            "x_scale_range": [ 0.40, 0.60 ],
-            "rot_range": [ -math.pi, math.pi ],
-            "aspect_range": [ 0.4, 1.0 ],
-            "min_contrast": 0.5,
-            "x_noise_multiplier_range": [ 0, 0 ],
-            "y_noise_multiplier_range": [ 0, 0 ],
-            "perlin_grid_size_range": [ 10, 100 ],
-            "background_color_range": [ 0.0, 1.0 ],
-            "blur_stddev_range": [ 0.0001, 0.15 ],
-            "no_code_prob": 0.0,
-        },
+        "rand_params": rand_params,
+        "val_rand_params": rand_params,
         "enable_backgrounds": True,
     },
     "log_freq": 10,

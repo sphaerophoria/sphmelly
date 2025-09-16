@@ -547,7 +547,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
         &barcode_gen,
         .{
             .cl_alloc = &cl_alloc,
-            .rand_params = config.data.rand_params,
+            .rand_params = config.data.val_rand_params,
             .rand_source = &rand_source,
             .num_images = config.val_size,
             .label_in_frame = config.data.label_in_frame,
