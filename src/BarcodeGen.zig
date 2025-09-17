@@ -73,6 +73,7 @@ pub const ConfidenceMetric = enum(u8) {
     none = 0,
     iou = 1,
     rotation_err = 2,
+    corner_dist = 3,
 };
 
 pub const MakeBarsParams = struct {
