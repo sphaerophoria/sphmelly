@@ -69,13 +69,19 @@ pub const Bars = struct {
     bars: math.Executor.Tensor,
 };
 
+pub const ConfidenceMetric = enum(u8) {
+    none = 0,
+    iou = 1,
+    rotation_err = 2,
+};
+
 pub const MakeBarsParams = struct {
     cl_alloc: *cl.Alloc,
     rand_params: RandomizationParams,
     enable_backgrounds: bool,
     num_images: u32,
     label_in_frame: bool,
-    label_iou: bool,
+    confidence_metric: ConfidenceMetric,
     rand_source: *math.RandSource,
 };
 pub fn makeBars(self: BarcodeGen, params: MakeBarsParams) !Bars {
@@ -85,7 +91,7 @@ pub fn makeBars(self: BarcodeGen, params: MakeBarsParams) !Bars {
 
     const sample_buf = try self.makeSampleBuf(params.cl_alloc, params.rand_source, num_barcodes);
     const blur_kernels = try self.makeBlurKernels(params.cl_alloc, 5, num_barcodes, params.rand_source, params.rand_params);
-    const instanced = try self.instanceRandParams(params.cl_alloc, sample_buf.sample_buf, params.rand_source, params.rand_params, out_dims, params.label_in_frame, params.label_iou);
+    const instanced = try self.instanceRandParams(params.cl_alloc, sample_buf.sample_buf, params.rand_source, params.rand_params, out_dims, params.label_in_frame, params.confidence_metric);
 
     const pass1_out = try self.runFirstPass(params.cl_alloc, instanced.params_buf, out_dims, params.enable_backgrounds);
     const pass2_out = try self.math_executor.maskedConv(params.cl_alloc, pass1_out.imgs, pass1_out.masks, blur_kernels);
@@ -98,7 +104,7 @@ pub fn makeBars(self: BarcodeGen, params: MakeBarsParams) !Bars {
     };
 }
 
-pub fn healBboxLabels(self: BarcodeGen, cl_alloc: *cl.Alloc, labels: math.Executor.Tensor, predicted: math.Executor.Tensor, label_iou: bool, disable_bbox_loss_if_out_of_frame: bool) !void {
+pub fn healBboxLabels(self: BarcodeGen, cl_alloc: *cl.Alloc, labels: math.Executor.Tensor, predicted: math.Executor.Tensor, confidence_metric: ConfidenceMetric, disable_bbox_loss_if_out_of_frame: bool) !void {
     if (!predicted.dims.eql(labels.dims)) {
         return error.InvalidDims;
     }
@@ -108,7 +114,7 @@ pub fn healBboxLabels(self: BarcodeGen, cl_alloc: *cl.Alloc, labels: math.Execut
         .{ .buf = labels.buf },
         .{ .buf = predicted.buf },
         .{ .uint = labels.dims.get(0) },
-        .{ .uint = @intFromBool(label_iou) },
+        .{ .uint = @intFromEnum(confidence_metric) },
         .{ .uint = @intFromBool(disable_bbox_loss_if_out_of_frame) },
         .{ .uint = n },
     });
@@ -153,7 +159,7 @@ fn instanceRandParams(
     rand_params: RandomizationParams,
     dims: math.TensorDims,
     label_in_frame: bool,
-    label_iou: bool,
+    confidence_metric: ConfidenceMetric,
 ) !RandParams {
     const num_barcodes = dims.get(2);
     const params_struct_size = 72;
@@ -161,7 +167,7 @@ fn instanceRandParams(
     const params_buf = try self.math_executor.createTensorUninitialized(cl_alloc, &.{total_params_buf_size});
 
     // x,y,sqrt(w),sqrt(h),rx,ry,fully_in_frame per barcode
-    const box_label_size: u32 = @as(u32, 6) + @intFromBool(label_in_frame) + @intFromBool(label_iou);
+    const box_label_size: u32 = @as(u32, 6) + @intFromBool(label_in_frame) + @intFromBool(confidence_metric != .none);
     const box_labels = try self.math_executor.createTensorUninitialized(cl_alloc, &.{ box_label_size, num_barcodes });
 
     // This fn call may look like a disaster, but it seems better than trying
@@ -227,8 +233,8 @@ fn instanceRandParams(
         .{ .uint = rand_source.seed },
         // label_in_frame,
         .{ .uint = @intFromBool(label_in_frame) },
-        // label_iou,
-        .{ .uint = @intFromBool(label_iou) },
+        // confidence_metric,
+        .{ .uint = @intFromEnum(confidence_metric) },
         // ctr_start
         .{ .ulong = rand_source.ctr },
     });

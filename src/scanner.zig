@@ -313,7 +313,7 @@ pub fn main() !void {
         .ctr = 0,
     };
 
-    var bars = try barcode_gen.makeBars(.{ .cl_alloc = &cl_alloc, .rand_params = stage1_config.data.rand_params, .enable_backgrounds = stage1_config.data.enable_backgrounds, .num_images = stage1_config.data.batch_size, .label_in_frame = stage1_config.data.label_in_frame, .label_iou = stage1_config.data.label_iou, .rand_source = &rand_source });
+    var bars = try barcode_gen.makeBars(.{ .cl_alloc = &cl_alloc, .rand_params = stage1_config.data.rand_params, .enable_backgrounds = stage1_config.data.enable_backgrounds, .num_images = stage1_config.data.batch_size, .label_in_frame = stage1_config.data.label_in_frame, .confidence_metric = stage1_config.data.confidence_metric, .rand_source = &rand_source });
 
     const reshaped_bars = try math_executor.reshape(&cl_alloc, bars.imgs, &.{ bars.imgs.dims.get(0), bars.imgs.dims.get(1), 1, bars.imgs.dims.get(2) });
 

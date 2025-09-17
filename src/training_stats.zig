@@ -14,12 +14,12 @@ pub const BboxLosses = struct {
     rx: f32,
     ry: f32,
     in_frame: ?f32,
-    iou: ?f32,
+    confidence: ?f32,
 };
 
 pub const EnabledLabels = struct {
     in_frame: bool,
-    iou: bool,
+    confidence: bool,
 };
 const BboxIndexes = struct {
     const x = 0;
@@ -30,12 +30,12 @@ const BboxIndexes = struct {
     const ry = 5;
 
     in_frame: ?usize,
-    iou: ?usize,
+    confidence: ?usize,
 
     fn labelStride(self: BboxIndexes) usize {
         var stride: usize = 6;
         if (self.in_frame != null) stride += 1;
-        if (self.iou != null) stride += 1;
+        if (self.confidence != null) stride += 1;
 
         return stride;
     }
@@ -44,20 +44,20 @@ const BboxIndexes = struct {
         var idx: usize = ry + 1;
 
         var in_frame: ?usize = null;
-        var iou: ?usize = null;
+        var confidence: ?usize = null;
         if (labels.in_frame) {
             in_frame = idx;
             idx += 1;
         }
 
-        if (labels.iou) {
-            iou = idx;
+        if (labels.confidence) {
+            confidence = idx;
             idx += 1;
         }
 
         return .{
             .in_frame = in_frame,
-            .iou = iou,
+            .confidence = confidence,
         };
     }
 };
@@ -70,7 +70,7 @@ fn sumItems(loss: []const f32) f32 {
     return sum;
 }
 
-// x, y, sqrt(w), sqrt(h), cos(rot), sin(rot), in_frame, iou
+// x, y, sqrt(w), sqrt(h), cos(rot), sin(rot), in_frame, confidence
 pub fn extractBboxLosses(comptime Executor: type, cl_alloc: *cl.Alloc, enabled_labels: EnabledLabels, executor: *Executor, loss: Executor.Tensor) !BboxLosses {
     const indexes = BboxIndexes.resolve(enabled_labels);
 
@@ -84,7 +84,7 @@ pub fn extractBboxLosses(comptime Executor: type, cl_alloc: *cl.Alloc, enabled_l
         .rx = loss_cpu[BboxIndexes.rx],
         .ry = loss_cpu[BboxIndexes.ry],
         .in_frame = if (indexes.in_frame) |i| loss_cpu[i] else null,
-        .iou = if (indexes.iou) |i| loss_cpu[i] else null,
+        .confidence = if (indexes.confidence) |i| loss_cpu[i] else null,
         .total = sumItems(loss_cpu),
     };
 }
@@ -218,7 +218,7 @@ pub fn calcBboxValidationData(
         // Width and height are calculated as sqrt, so square to get back to real life
         .width_err = try err_calculator.squaredErr(BboxIndexes.rx),
         .height_err = try err_calculator.squaredErr(BboxIndexes.ry),
-        .confidence_err = if (indexes.iou) |i| try err_calculator.linearErr(i) else null,
+        .confidence_err = if (indexes.confidence) |i| try err_calculator.linearErr(i) else null,
         .in_frame_err = if (indexes.in_frame) |i| try err_calculator.linearErr(i) else null,
     };
 }

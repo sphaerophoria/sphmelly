@@ -573,7 +573,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
             .rand_source = &rand_source,
             .num_images = config.val_size,
             .label_in_frame = config.data.label_in_frame,
-            .label_iou = config.data.label_iou,
+            .confidence_metric = config.data.confidence_metric,
             .enable_backgrounds = config.data.enable_backgrounds,
         },
         math_executor,
@@ -610,7 +610,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                         .rand_source = &rand_source,
                         .num_images = config.data.batch_size,
                         .label_in_frame = config.data.label_in_frame,
-                        .label_iou = config.data.label_iou,
+                        .confidence_metric = config.data.confidence_metric,
                         .enable_backgrounds = config.data.enable_backgrounds,
                     },
                     math_executor,
@@ -623,7 +623,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                 try notifier.predictionsQueued(results[results.len - 1]);
 
                 if (config.train_target == .bbox) {
-                    try barcode_gen.healBboxLabels(&cl_alloc, train_input.expected, tracing_executor.getClTensor(results[results.len - 1].buf), config.data.label_iou, config.disable_bbox_loss_if_out_of_frame);
+                    try barcode_gen.healBboxLabels(&cl_alloc, train_input.expected, tracing_executor.getClTensor(results[results.len - 1].buf), config.data.confidence_metric, config.disable_bbox_loss_if_out_of_frame);
                 }
                 try notifier.batchGenerationQueued(train_input.bars.imgs, train_input.expected);
 
@@ -659,7 +659,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                         .bbox => {
                             const enabled_labels = training_stats.EnabledLabels{
                                 .in_frame = config.data.label_in_frame,
-                                .iou = config.data.label_iou,
+                                .confidence = config.data.confidence_metric != .none,
                             };
                             const box_stats = try training_stats.extractBboxLosses(
                                 math.TracingExecutor,
@@ -674,7 +674,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                             if (iter % config.val_freq == 0) {
                                 const layer_outputs = try nn.runLayers(&cl_alloc, validation_set.input, layers, &tracing_executor);
                                 const val_results = tracing_executor.getClTensor(layer_outputs[layer_outputs.len - 1].buf);
-                                try barcode_gen.healBboxLabels(&cl_alloc, validation_set.expected, val_results, config.data.label_iou, config.disable_bbox_loss_if_out_of_frame);
+                                try barcode_gen.healBboxLabels(&cl_alloc, validation_set.expected, val_results, config.data.confidence_metric, config.disable_bbox_loss_if_out_of_frame);
                                 const val_stats = try training_stats.calcBboxValidationData(
                                     &cl_alloc,
                                     enabled_labels,

@@ -117,7 +117,7 @@ const ImageUpdater = struct {
                 .enable_backgrounds = true,
                 .num_images = self.config.data.batch_size,
                 .label_in_frame = self.config.data.label_in_frame,
-                .label_iou = self.config.data.label_iou,
+                .confidence_metric = self.config.data.confidence_metric,
                 .rand_source = &rand_source,
             },
         );
@@ -223,7 +223,7 @@ const Config = struct {
     data: struct {
         batch_size: u32,
         label_in_frame: bool,
-        label_iou: bool,
+        confidence_metric: BarcodeGen.ConfidenceMetric,
         img_size: u32,
         rand_params: BarcodeGen.RandomizationParams,
     },

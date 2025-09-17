@@ -282,7 +282,7 @@ __kernel void sample_barcode_params(
     uint num_images,
     uint seed,
     uint label_in_frame,
-    uint label_iou,
+    uint confidence_metric,
     ulong ctr_start
 ) {
 
@@ -353,7 +353,7 @@ __kernel void sample_barcode_params(
         label_stride += 1;
     }
 
-    if (label_iou) {
+    if (confidence_metric != 0) {
         iou_idx = label_stride;
         label_stride += 1;
     }
@@ -390,7 +390,7 @@ __kernel void sample_barcode_params(
             box_labels_out[global_id * label_stride + in_frame_idx] = fully_in_frame;
         }
 
-        if (label_iou) {
+        if (confidence_metric != 0) {
             box_labels_out[global_id * label_stride + iou_idx] = 0;
         }
     } else {
@@ -405,7 +405,7 @@ __kernel void sample_barcode_params(
             box_labels_out[global_id * label_stride + in_frame_idx] = 0.0f;
         }
 
-        if (label_iou) {
+        if (confidence_metric != 0) {
             box_labels_out[global_id * label_stride + iou_idx] = 0.0f;
         }
     }
@@ -554,7 +554,7 @@ __kernel void heal_orientations(
         __global float* labels,
         __global float* predictions,
         uint label_stride,
-        uint predict_iou,
+        uint confidence_metric,
         uint disable_bbox_loss_if_out_of_frame,
         uint n
 ) {
@@ -572,7 +572,7 @@ __kernel void heal_orientations(
         thread_label[5] = -thread_label[5];
     }
 
-    if (predict_iou) {
+    if (confidence_metric == 1) {
         float common_repr_a[5] = {
             thread_label[0],
             thread_label[1],
@@ -591,8 +591,14 @@ __kernel void heal_orientations(
         struct box box_a = box_from_data_repr(common_repr_a);
         struct box box_b = box_from_data_repr(common_repr_b);
 
-        uint iou_idx = label_stride - 1;
-        thread_label[iou_idx] = calc_iou_inner(box_a, box_b);
+        uint confidence_idx = label_stride - 1;
+        thread_label[confidence_idx] = calc_iou_inner(box_a, box_b);
+    } else if (confidence_metric == 2) {
+        uint confidence_idx = label_stride - 1;
+        float2 label_norm = normalize((float2){thread_label[4], thread_label[5]});
+        float2 pred_norm = normalize((float2){thread_prediction[4], thread_prediction[5]});
+        float rot_err = acos(clamp(dot(pred_norm, label_norm), -1.0f, 1.0f));
+        thread_label[confidence_idx] = rot_err;
     }
 
     // HACK HACK HACK: Basically make all losses 0 if out of frame by setting
@@ -606,7 +612,7 @@ __kernel void heal_orientations(
             thread_label[3] = thread_prediction[3];
             thread_label[4] = thread_prediction[4];
             thread_label[5] = thread_prediction[5];
-            if (predict_iou) {
+            if (confidence_metric != 0) {
                 thread_label[7] = thread_prediction[7];
             }
         }

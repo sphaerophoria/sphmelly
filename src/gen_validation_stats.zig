@@ -82,7 +82,7 @@ pub fn main() !void {
         .rand_params = config.data.val_rand_params,
         .label_in_frame = config.data.label_in_frame,
         .rand_source = &rand_source,
-        .label_iou = config.data.label_iou,
+        .confidence_metric = config.data.confidence_metric,
     });
 
     const results = try nn.runLayersUntraced(
@@ -92,11 +92,11 @@ pub fn main() !void {
         &math_executor,
     );
 
-    try barcode_gen.healBboxLabels(&cl_alloc, bars.box_labels, results, config.data.label_iou, config.disable_bbox_loss_if_out_of_frame);
+    try barcode_gen.healBboxLabels(&cl_alloc, bars.box_labels, results, config.data.confidence_metric, config.disable_bbox_loss_if_out_of_frame);
 
     const data = try training_stats.calcBboxValidationData(&cl_alloc, .{
         .in_frame = config.data.label_in_frame,
-        .iou = config.data.label_iou,
+        .confidence = config.data.confidence_metric != .none,
     }, &barcode_gen, math_executor, results, bars.box_labels);
 
     const out_f = try std.fs.cwd().createFile(out_path, .{});
