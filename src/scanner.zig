@@ -335,8 +335,8 @@ pub fn main() !void {
     const flipped_box_predictions = try barcode_gen.flipBoxes(&cl_alloc, box_predictions);
     const boxes_cpu = try math_executor.toCpu(cl_alloc.heap(), &cl_alloc, box_predictions);
 
-    const boxes = try barcode_gen.boxPredictionToBox(&cl_alloc, box_predictions);
-    const flipped_boxes = try barcode_gen.boxPredictionToBox(&cl_alloc, flipped_box_predictions);
+    const boxes = try barcode_gen.boxPredictionToBox(&cl_alloc, box_predictions, 1.1);
+    const flipped_boxes = try barcode_gen.boxPredictionToBox(&cl_alloc, flipped_box_predictions, 1.1);
 
     const extracted = try math_executor.downsampleBox(
         &cl_alloc,

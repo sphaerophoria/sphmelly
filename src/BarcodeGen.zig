@@ -266,15 +266,15 @@ fn runFirstPass(self: BarcodeGen, cl_alloc: *cl.Alloc, params_buf: math.Executor
     };
 }
 
-pub fn boxPredictionToBox(self: BarcodeGen, cl_alloc: *cl.Alloc, boxes: math.Executor.Tensor) !math.Executor.Tensor {
+pub fn boxPredictionToBox(self: BarcodeGen, cl_alloc: *cl.Alloc, boxes: math.Executor.Tensor, dilation: f32) !math.Executor.Tensor {
     if (boxes.dims.len() != 2) return error.InvalidDims;
-    if (boxes.dims.get(0) != 6) return error.InvalidDims;
 
     const ret = try self.math_executor.createTensorUninitialized(cl_alloc, &.{ 5, boxes.dims.get(1) });
     const n = ret.dims.get(1);
     try self.math_executor.executor.executeKernelUntracked(cl_alloc, self.box_prediction_to_box_kernel, n, &.{
         .{ .buf = boxes.buf },
         .{ .buf = ret.buf },
+        .{ .float = dilation },
         .{ .uint = boxes.dims.get(0) },
         .{ .uint = n },
     });

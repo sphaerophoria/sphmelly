@@ -621,6 +621,7 @@ __kernel void flip_boxes(
 __kernel void box_prediction_to_box(
     __global float* in,
     __global float* out,
+    float dilation,
     uint in_label_stride,
     uint n
 ) {
@@ -633,7 +634,7 @@ __kernel void box_prediction_to_box(
     thread_out[0] = thread_in[0];
     thread_out[1] = thread_in[1];
     // Dilate box a little for stage 2
-    thread_out[2] = thread_in[2] * thread_in[2] * 1.1;
-    thread_out[3] = thread_in[3] * thread_in[3] * 1.1;
+    thread_out[2] = thread_in[2] * thread_in[2] * dilation;
+    thread_out[3] = thread_in[3] * thread_in[3] * dilation;
     thread_out[4] = atan2(thread_in[5], thread_in[4]);
 }

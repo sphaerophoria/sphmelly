@@ -74,6 +74,14 @@ pub fn build(b: *std.Build) void {
     });
     addCommonDependencies(b, scanner, sphtud_mod);
 
+    const gen_validation_stats = b.addExecutable(.{
+        .name = "gen_validation_stats",
+        .root_source_file = b.path("src/gen_validation_stats.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    addCommonDependencies(b, gen_validation_stats, sphtud_mod);
+
     const conv_test_data = generateConvTestData(b);
     const bce_test_data = generateBceTestData(b);
 
@@ -97,4 +105,5 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(train_output_vis);
     b.installArtifact(iou_demo);
     b.installArtifact(scanner);
+    b.installArtifact(gen_validation_stats);
 }

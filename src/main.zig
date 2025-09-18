@@ -15,6 +15,7 @@ const AppAllocators = sphrender.AppAllocators(100);
 const train_ui = @import("train_ui.zig");
 const nn_checkpoint = @import("nn/checkpoint.zig");
 const Config = @import("Config.zig");
+const training_stats = @import("training_stats.zig");
 
 const GuiDataReq = struct {
     alloc_buf: []u8,
@@ -474,6 +475,27 @@ fn generateTrainingInput(barcode_gen: *BarcodeGen, make_bars_params: BarcodeGen.
     };
 }
 
+fn logBboxLosses(logger: anytype, box_stats: training_stats.BboxLosses) !void {
+    inline for (std.meta.fields(@TypeOf(box_stats))) |field| {
+        const val_opt: ?f32 = @field(box_stats, field.name);
+        if (val_opt) |val| {
+            try logger.print("{s} loss,{d}\n", .{ field.name, val });
+        }
+    }
+}
+
+pub fn logBboxVal(logger: anytype, val_stats: training_stats.BboxValidationData) !void {
+    inline for (std.meta.fields(@TypeOf(val_stats))) |field| {
+        const segmented_stats: ?training_stats.SegmentedStats = @field(val_stats, field.name);
+        if (segmented_stats) |s| {
+            inline for (std.meta.fields(training_stats.SegmentedStats)) |stat_field| {
+                const val: f32 = @field(s, stat_field.name);
+                try logger.print("{s} {s},{d}\n", .{ field.name, stat_field.name, val });
+            }
+        }
+    }
+}
+
 fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Config, out_dir: std.fs.Dir, initial_checkpoint_path: ?[]const u8) !void {
     defer {
         channels.train_to_gui.send(.shutdown) catch {
@@ -635,70 +657,33 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                     const loss_cpu = try tracing_executor.toCpu(cl_alloc.heap(), &cl_alloc, loss);
                     switch (config.train_target) {
                         .bbox => {
-                            const num_predictions: u32 = @as(u32, 6) + @intFromBool(config.data.label_iou) + @intFromBool(config.data.label_in_frame);
+                            const enabled_labels = training_stats.EnabledLabels{
+                                .in_frame = config.data.label_in_frame,
+                                .iou = config.data.label_iou,
+                            };
+                            const box_stats = try training_stats.extractBboxLosses(
+                                math.TracingExecutor,
+                                &cl_alloc,
+                                enabled_labels,
+                                &tracing_executor,
+                                loss,
+                            );
 
-                            const max_num_predictions = 8;
-                            var total_losses: [max_num_predictions]f32 = @splat(0);
-                            for (0..loss_cpu.len / num_predictions) |i| {
-                                for (0..num_predictions) |j| {
-                                    total_losses[j] += loss_cpu[i * num_predictions + j];
-                                }
-                            }
-
-                            if (config.data.label_iou) {
-                                // Don't want to deal with label ordering problems
-                                std.debug.assert(config.data.label_in_frame);
-                            }
-
-                            const labels: [max_num_predictions][]const u8 = .{ "dx", "dy", "dw", "dh", "drx", "dry", "in_frame", "iou" };
-                            for (total_losses, &labels) |total_loss, label| {
-                                try log_writer.print("{s} loss,{d}\n", .{ label, total_loss });
-                            }
-                            var total_loss: f32 = 0;
-                            for (total_losses) |v| {
-                                total_loss += v;
-                            }
-                            try log_writer.print("total loss,{d}\n", .{total_loss});
+                            try logBboxLosses(log_writer, box_stats);
 
                             if (iter % config.val_freq == 0) {
-                                const val_results = try nn.runLayers(&cl_alloc, validation_set.input, layers, &tracing_executor);
-
-                                try barcode_gen.healBboxLabels(&cl_alloc, validation_set.expected, tracing_executor.getClTensor(val_results[val_results.len - 1].buf), config.data.label_iou);
-
-                                const val_err = try math_executor.sub(&cl_alloc, tracing_executor.getClTensor(val_results[val_results.len - 1].buf), validation_set.expected);
-
-                                const val_err_cpu = try math_executor.toCpu(cl_alloc.heap(), &cl_alloc, val_err);
-                                var total_val_mse: f32 = 0;
-                                for (val_err_cpu) |l| {
-                                    total_val_mse += l * l;
-                                }
-
-                                std.debug.assert(val_err.dims.get(0) == num_predictions);
-                                std.debug.assert(val_err.dims.len() == 2);
-
-                                var totals: [max_num_predictions]f32 = @splat(0);
-                                var sum_squares: [max_num_predictions]f32 = @splat(0);
-                                for (0..val_err_cpu.len / num_predictions) |i| {
-                                    for (0..num_predictions) |j| {
-                                        const val = val_err_cpu[i * num_predictions + j];
-                                        totals[j] += @abs(val);
-                                        sum_squares[j] += val * val;
-                                    }
-                                }
-                                const val_size_f: f32 = @floatFromInt(config.val_size);
-                                for (&totals) |*t| {
-                                    t.* /= val_size_f;
-                                }
-                                for (&sum_squares) |*t| {
-                                    t.* /= val_size_f;
-                                }
-
-                                try log_writer.print("val mse,{d}\n", .{total_val_mse / val_size_f});
-
-                                for (labels, totals, sum_squares) |label, average, mse| {
-                                    try log_writer.print("avg {s},{d}\n", .{ label, average });
-                                    try log_writer.print("mse {s},{d}\n", .{ label, mse });
-                                }
+                                const layer_outputs = try nn.runLayers(&cl_alloc, validation_set.input, layers, &tracing_executor);
+                                const val_results = tracing_executor.getClTensor(layer_outputs[layer_outputs.len - 1].buf);
+                                try barcode_gen.healBboxLabels(&cl_alloc, validation_set.expected, val_results, config.data.label_iou);
+                                const val_stats = try training_stats.calcBboxValidationData(
+                                    &cl_alloc,
+                                    enabled_labels,
+                                    &barcode_gen,
+                                    math_executor,
+                                    val_results,
+                                    validation_set.expected,
+                                );
+                                try logBboxVal(log_writer, val_stats);
                             }
                         },
                         .bars => {
