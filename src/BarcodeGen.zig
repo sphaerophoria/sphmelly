@@ -98,7 +98,7 @@ pub fn makeBars(self: BarcodeGen, params: MakeBarsParams) !Bars {
     };
 }
 
-pub fn healBboxLabels(self: BarcodeGen, cl_alloc: *cl.Alloc, labels: math.Executor.Tensor, predicted: math.Executor.Tensor, label_iou: bool) !void {
+pub fn healBboxLabels(self: BarcodeGen, cl_alloc: *cl.Alloc, labels: math.Executor.Tensor, predicted: math.Executor.Tensor, label_iou: bool, disable_bbox_loss_if_out_of_frame: bool) !void {
     if (!predicted.dims.eql(labels.dims)) {
         return error.InvalidDims;
     }
@@ -109,6 +109,7 @@ pub fn healBboxLabels(self: BarcodeGen, cl_alloc: *cl.Alloc, labels: math.Execut
         .{ .buf = predicted.buf },
         .{ .uint = labels.dims.get(0) },
         .{ .uint = @intFromBool(label_iou) },
+        .{ .uint = @intFromBool(disable_bbox_loss_if_out_of_frame) },
         .{ .uint = n },
     });
 }

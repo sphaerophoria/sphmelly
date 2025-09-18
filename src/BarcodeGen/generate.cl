@@ -366,6 +366,7 @@ __kernel void sample_barcode_params(
         box_labels_out[global_id * label_stride + 4] = box_x_axis[0];
         box_labels_out[global_id * label_stride + 5] = box_x_axis[1];
 
+        // FIXME: out of frame behavior should probably match unrendered behavior
         if (label_in_frame) {
             float2 box_y_axis = {-box_x_axis[1], box_x_axis[0]};
 
@@ -554,6 +555,7 @@ __kernel void heal_orientations(
         __global float* predictions,
         uint label_stride,
         uint predict_iou,
+        uint disable_bbox_loss_if_out_of_frame,
         uint n
 ) {
     uint global_id = get_global_id(0);
@@ -591,6 +593,23 @@ __kernel void heal_orientations(
 
         uint iou_idx = label_stride - 1;
         thread_label[iou_idx] = calc_iou_inner(box_a, box_b);
+    }
+
+    // HACK HACK HACK: Basically make all losses 0 if out of frame by setting
+    // label == prediction
+    if (disable_bbox_loss_if_out_of_frame) {
+        uint in_frame_idx = 6;
+        if (thread_label[in_frame_idx] > 0.5) {
+            thread_label[0] = thread_prediction[0];
+            thread_label[1] = thread_prediction[1];
+            thread_label[2] = thread_prediction[2];
+            thread_label[3] = thread_prediction[3];
+            thread_label[4] = thread_prediction[4];
+            thread_label[5] = thread_prediction[5];
+            if (predict_iou) {
+                thread_label[7] = thread_prediction[7];
+            }
+        }
     }
 }
 

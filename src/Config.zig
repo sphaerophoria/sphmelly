@@ -18,6 +18,7 @@ val_size: u32,
 checkpoint_freq: u32,
 train_target: TrainTarget,
 loss_multipliers: []f32,
+disable_bbox_loss_if_out_of_frame: bool = false,
 network: nn.Config,
 
 pub const TrainTarget = enum {
@@ -34,6 +35,10 @@ pub fn parse(leaky: std.mem.Allocator, path: []const u8) !Config {
 
     if (ret.val_freq % ret.log_freq != 0) {
         return error.InvalidValFreq;
+    }
+
+    if (ret.disable_bbox_loss_if_out_of_frame and !ret.data.label_in_frame) {
+        return error.InvalidBboxLabel;
     }
 
     return ret;

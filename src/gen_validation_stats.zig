@@ -92,7 +92,7 @@ pub fn main() !void {
         &math_executor,
     );
 
-    try barcode_gen.healBboxLabels(&cl_alloc, bars.box_labels, results, config.data.label_iou);
+    try barcode_gen.healBboxLabels(&cl_alloc, bars.box_labels, results, config.data.label_iou, config.disable_bbox_loss_if_out_of_frame);
 
     const data = try training_stats.calcBboxValidationData(&cl_alloc, .{
         .in_frame = config.data.label_in_frame,
