@@ -25,7 +25,7 @@ config = {
         "batch_size": batch_size,
         "img_size": img_size,
         "label_in_frame": False,
-        "label_confidence": False,
+        "confidence_metric": "none",
         "rand_params": rand_params,
         "val_rand_params": rand_params,
         "enable_backgrounds": True,
