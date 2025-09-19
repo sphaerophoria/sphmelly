@@ -3,12 +3,12 @@
 import json
 import math
 
-batch_size = 10;
-img_size = 600
-conv_end_size = img_size / 6 * img_size / 6 * 8
+batch_size = 40;
+img_size = 380
+conv_end_size = img_size / 4 * img_size / 4 * 8
 rand_params = {
-    "x_offs_range": [ -20, 20 ],
-    "y_offs_range": [ -20, 20 ],
+    "x_offs_range": [ -20 * 2 / 3, 20  * 2 / 3],
+    "y_offs_range": [ -20 * 2 / 3, 20  * 2 / 3],
     "x_scale_range": [ 0.85, 1.0 ],
     "rot_range": [ -math.pi / 16, math.pi / 16 ],
     "aspect_range": [0.7, 1.3],
@@ -37,7 +37,7 @@ config = {
     "loss_multipliers": [],
     "train_target": "bars",
     "network": {
-        "lr": 0.004,
+        "lr": 0.001,
         "layers": [
             { "conv": ["he", 3, 3, 1, 4] },
             { "relu": 0.1 },
@@ -49,7 +49,7 @@ config = {
             { "relu": 0.1 },
             { "conv": ["he", 3, 3, 4, 8] },
             { "relu": 0.1 },
-            { "maxpool": 3 },
+            { "maxpool": 2 },
 
             { "conv": ["he", 1, 1, 8, 4] },
             { "relu": 0.1 },
