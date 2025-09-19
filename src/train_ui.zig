@@ -237,7 +237,7 @@ const BarRetrievers = struct {
 };
 const Widgets = struct {
     image_view: *tsv.ImageView(GuiAction),
-    runner: sphtud.ui.runner.Runner(GuiAction),
+    runner: *sphtud.ui.runner.Runner(GuiAction),
     solid_color_renderer: *sphtud.render.xyt_program.SolidColorProgram,
     bar_retrievers: ?BarRetrievers,
 };

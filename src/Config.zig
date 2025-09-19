@@ -30,7 +30,9 @@ pub fn parse(leaky: std.mem.Allocator, path: []const u8) !Config {
     const f = try std.fs.cwd().openFile(path, .{});
     defer f.close();
 
-    var json_reader = std.json.reader(leaky, f.reader());
+    var reader_buf: [4096]u8 = undefined;
+    var f_reader = f.reader(&reader_buf);
+    var json_reader = std.json.Reader.init(leaky, &f_reader.interface);
     const ret = try std.json.parseFromTokenSourceLeaky(Config, leaky, &json_reader, .{});
 
     if (ret.val_freq % ret.log_freq != 0) {
