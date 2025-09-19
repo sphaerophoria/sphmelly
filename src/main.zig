@@ -902,6 +902,7 @@ pub fn main() !void {
         var writer_buf: [4096]u8 = undefined;
         var config_writer = config_out.writer(&writer_buf);
         try std.json.Stringify.value(config, .{ .whitespace = .indent_2 }, &config_writer.interface);
+        try config_writer.interface.flush();
     }
 
     var ui: train_ui.Gui = undefined;

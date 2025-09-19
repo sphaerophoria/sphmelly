@@ -92,7 +92,7 @@ pub fn write(cl_alloc: *cl.Alloc, executor: anytype, out_dir: std.fs.Dir, name: 
             param_out.* = .{
                 .key = param.key,
                 .dims = param.tensor.dims.inner,
-                .byte_offs = @intCast(data_writer.pos),
+                .byte_offs = @intCast(data_writer.pos + data_writer.interface.end),
             };
 
             const cp = cl_alloc.checkpoint();
@@ -114,4 +114,5 @@ pub fn write(cl_alloc: *cl.Alloc, executor: anytype, out_dir: std.fs.Dir, name: 
         .layer_checkpoints = layer_checkpoints,
         .weights = "data.bin",
     }, .{ .whitespace = .indent_2 }, &spec_writer.interface);
+    try spec_writer.interface.flush();
 }
