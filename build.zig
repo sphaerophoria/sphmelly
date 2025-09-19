@@ -36,49 +36,61 @@ pub fn build(b: *std.Build) void {
 
     const exe = b.addExecutable(.{
         .name = "sphmelly",
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     addCommonDependencies(b, exe, sphtud_mod);
 
     const train_output_vis = b.addExecutable(.{
         .name = "train_output_vis",
-        .root_source_file = b.path("src/train_output_vis.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/train_output_vis.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     addCommonDependencies(b, train_output_vis, sphtud_mod);
 
     const iou_demo = b.addExecutable(.{
         .name = "iou_demo",
-        .root_source_file = b.path("src/iou_demo.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/iou_demo.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     addCommonDependencies(b, iou_demo, sphtud_mod);
 
     const imagegen = b.addExecutable(.{
         .name = "imagegen",
-        .root_source_file = b.path("src/imagegen.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/imagegen.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     addCommonDependencies(b, imagegen, sphtud_mod);
 
     const scanner = b.addExecutable(.{
         .name = "scanner",
-        .root_source_file = b.path("src/scanner.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/scanner.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     addCommonDependencies(b, scanner, sphtud_mod);
 
     const gen_validation_stats = b.addExecutable(.{
         .name = "gen_validation_stats",
-        .root_source_file = b.path("src/gen_validation_stats.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/gen_validation_stats.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     addCommonDependencies(b, gen_validation_stats, sphtud_mod);
 
@@ -87,9 +99,11 @@ pub fn build(b: *std.Build) void {
 
     const test_exe = b.addTest(.{
         .name = "test",
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     addCommonDependencies(b, test_exe, sphtud_mod);
     test_exe.root_module.addAnonymousImport("conv_test_data", .{

@@ -210,9 +210,8 @@ pub fn parseData(alloc: std.mem.Allocator, scratch: sphtud.alloc.LinearAllocator
     const f = try std.fs.cwd().openFile(path, .{});
     defer f.close();
 
-    const reader = f.reader();
-
-    var line_buf: [4096]u8 = undefined;
+    var reader_buf: [4096]u8 = undefined;
+    var reader = f.reader(&reader_buf);
 
     var steps = try sphtud.util.RuntimeSegmentedList(Step).init(
         alloc,
@@ -224,7 +223,7 @@ pub fn parseData(alloc: std.mem.Allocator, scratch: sphtud.alloc.LinearAllocator
     var keyed_data = std.AutoHashMapUnmanaged(KeyId, KeyData){};
 
     {
-        const first_line = try reader.readUntilDelimiterOrEof(&line_buf, '\n') orelse return error.EmptyFile;
+        const first_line = try reader.interface.takeDelimiterExclusive('\n');
         switch (try parseTrainingLogLine(first_line)) {
             .step => |s| try steps.append(s),
             .kv => return error.InvalidFirstLine,
@@ -232,8 +231,11 @@ pub fn parseData(alloc: std.mem.Allocator, scratch: sphtud.alloc.LinearAllocator
     }
 
     while (true) {
-        const line = (try reader.readUntilDelimiterOrEof(&line_buf, '\n')) orelse {
-            break;
+        const line = reader.interface.takeDelimiterExclusive('\n') catch |e| {
+            if (e == error.EndOfStream) {
+                break;
+            }
+            return e;
         };
 
         switch (try parseTrainingLogLine(line)) {

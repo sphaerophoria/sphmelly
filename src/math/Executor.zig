@@ -167,7 +167,7 @@ pub fn init(cl_alloc: *cl.Alloc, executor: *cl.Executor) !Executor {
 
 pub fn addAssign(self: Executor, cl_alloc: *cl.Alloc, a: Tensor, b: Tensor) !void {
     if (!a.dims.eql(b.dims)) {
-        std.log.err("{any} does not match {any}\n", .{ a.dims, b.dims });
+        std.log.err("{f} does not match {f}\n", .{ a.dims, b.dims });
         return error.InvalidDims;
     }
 
@@ -219,7 +219,7 @@ pub fn reshape(_: Executor, cl_alloc: *cl.Alloc, val: Tensor, new_dims_in: anyty
     };
 
     if (new_dims.numElems() != val.dims.numElems()) {
-        std.log.err("invalid reshape {} -> {}", .{ val.dims, new_dims });
+        std.log.err("invalid reshape {f} -> {f}", .{ val.dims, new_dims });
         return error.InvalidDims;
     }
 
@@ -633,7 +633,7 @@ fn validateMatmulDims(a: Tensor, b: Tensor) !void {
     }
 
     if (a.dims.get(0) != b.dims.get(1)) {
-        std.log.err("{} cannot matmul {}\n", .{ a.dims, b.dims });
+        std.log.err("{f} cannot matmul {f}\n", .{ a.dims, b.dims });
         return error.InvalidDims;
     }
 }
@@ -727,7 +727,7 @@ pub fn sigmoid(self: Executor, cl_alloc: *cl.Alloc, in: Tensor) !Tensor {
 
 pub fn sigmoidGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_grad: Tensor, in: Tensor) !Tensor {
     if (!downstream_grad.dims.eql(in.dims)) {
-        std.log.err("downstream {any} does not match in {any}\n", .{ downstream_grad.dims, in.dims });
+        std.log.err("downstream {f} does not match in {f}\n", .{ downstream_grad.dims, in.dims });
         return error.InvalidDims;
     }
 
@@ -766,7 +766,7 @@ pub fn relu(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, leak: f32) !Tensor 
 
 pub fn reluGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_grad: Tensor, in: Tensor, leak: f32) !Tensor {
     if (!downstream_grad.dims.eql(in.dims)) {
-        std.log.err("downstream {any} does not match in {any}\n", .{ downstream_grad.dims, in.dims });
+        std.log.err("downstream {f} does not match in {f}\n", .{ downstream_grad.dims, in.dims });
         return error.InvalidDims;
     }
 

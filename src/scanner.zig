@@ -109,9 +109,10 @@ const Args = struct {
     }
 
     fn help(process_name: []const u8) noreturn {
-        const stdout = std.io.getStdOut();
+        var stdout_buf: [4096]u8 = undefined;
+        var stdout = std.fs.File.stdout().writer(&stdout_buf);
 
-        stdout.writer().print(
+        stdout.interface.print(
             \\USAGE: {s} [ARGS]
             \\
             \\Required args:
@@ -122,6 +123,7 @@ const Args = struct {
             \\--stage2-checkpoint
             \\
         , .{process_name}) catch {};
+        stdout.interface.flush() catch {};
 
         std.process.exit(1);
     }
@@ -280,13 +282,17 @@ pub fn main() !void {
 
     var stage1_config = blk: {
         const f = try std.fs.cwd().openFile(args.stage1_config, .{});
-        var json_reader = std.json.reader(allocators.root.arena(), f.reader());
+        var reader_buf: [4096]u8 = undefined;
+        var f_reader = f.reader(&reader_buf);
+        var json_reader = std.json.Reader.init(allocators.root.arena(), &f_reader.interface);
         break :blk try std.json.parseFromTokenSourceLeaky(Config, allocators.root.arena(), &json_reader, .{ .ignore_unknown_fields = true });
     };
 
     const stage2_config = blk: {
         const f = try std.fs.cwd().openFile(args.stage2_config, .{});
-        var json_reader = std.json.reader(allocators.root.arena(), f.reader());
+        var reader_buf: [4096]u8 = undefined;
+        var f_reader = f.reader(&reader_buf);
+        var json_reader = std.json.Reader.init(allocators.root.arena(), &f_reader.interface);
         break :blk try std.json.parseFromTokenSourceLeaky(Config, allocators.root.arena(), &json_reader, .{ .ignore_unknown_fields = true });
     };
 

@@ -159,37 +159,39 @@ const TrainResponseBuilder = struct {
     }
 };
 
-pub fn SharedChannel(comptime T: type, comptime size: usize) type {
+pub fn SharedChannel(comptime T: type) type {
     return struct {
         mutex: std.Thread.Mutex,
-        protected: std.fifo.LinearFifo(T, .{ .Static = size }),
+        protected: sphtud.util.CircularBuffer(T),
 
         const Self = @This();
 
-        const init = Self{
-            .mutex = .{},
-            .protected = .init(),
-        };
+        fn init(buf: []T) Self {
+            return .{
+                .mutex = .{},
+                .protected = .{ .items = buf },
+            };
+        }
 
         fn send(self: *Self, val: T) !void {
             self.mutex.lock();
             defer self.mutex.unlock();
 
-            try self.protected.writeItem(val);
+            _ = self.protected.push(val);
         }
 
         fn poll(self: *Self) ?T {
             self.mutex.lock();
             defer self.mutex.unlock();
 
-            return self.protected.readItem();
+            return self.protected.pop();
         }
     };
 }
 
 const SharedChannels = struct {
-    gui_to_train: SharedChannel(TrainRequest, 1024) = .init,
-    train_to_gui: SharedChannel(TrainResponse, 1024) = .init,
+    gui_to_train: SharedChannel(TrainRequest),
+    train_to_gui: SharedChannel(TrainResponse),
 };
 
 const DeferredRead = struct {
@@ -587,10 +589,8 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
     const log_file = try out_dir.createFile("log.csv", .{});
     defer log_file.close();
 
-    var buf_writer = std.io.bufferedWriter(log_file.writer());
-    defer buf_writer.flush() catch {};
-
-    const log_writer = buf_writer.writer();
+    var log_writer_buf: [4096]u8 = undefined;
+    var log_writer = log_file.writer(&log_writer_buf);
 
     const math_checkpoint = tracing_executor.checkpoint();
     const cl_alloc_checkpoint = cl_alloc.checkpoint();
@@ -652,7 +652,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                 if (iter % config.log_freq == 0) {
                     const wall_time = (try std.time.Instant.now()).since(start_time);
 
-                    try log_writer.print("step,{d},{d},{d}\n", .{ iter, wall_time, iter * config.data.batch_size });
+                    try log_writer.interface.print("step,{d},{d},{d}\n", .{ iter, wall_time, iter * config.data.batch_size });
 
                     const loss_cpu = try tracing_executor.toCpu(cl_alloc.heap(), &cl_alloc, loss);
                     switch (config.train_target) {
@@ -669,7 +669,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                                 loss,
                             );
 
-                            try logBboxLosses(log_writer, box_stats);
+                            try logBboxLosses(&log_writer.interface, box_stats);
 
                             if (iter % config.val_freq == 0) {
                                 const layer_outputs = try nn.runLayers(&cl_alloc, validation_set.input, layers, &tracing_executor);
@@ -683,7 +683,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                                     val_results,
                                     validation_set.expected,
                                 );
-                                try logBboxVal(log_writer, val_stats);
+                                try logBboxVal(&log_writer.interface, val_stats);
                             }
                         },
                         .bars => {
@@ -692,7 +692,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                                 total_loss += v;
                             }
 
-                            try log_writer.print("loss,{d}\n", .{total_loss});
+                            try log_writer.interface.print("loss,{d}\n", .{total_loss});
 
                             if (iter % config.val_freq == 0) {
                                 const val_results = try nn.runLayers(&cl_alloc, validation_set.input, layers, &tracing_executor);
@@ -724,16 +724,15 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
 
                                 const bars_per_code_f: f32 = @floatFromInt(bars_per_code);
                                 const val_size_f: f32 = @floatFromInt(config.val_size);
-                                try log_writer.print("correct bars,{d}\n", .{correct_bars});
-                                try log_writer.print("correct bars ratio,{d}\n", .{@as(f32, @floatFromInt(correct_bars)) / val_size_f / bars_per_code_f});
+                                try log_writer.interface.print("correct bars,{d}\n", .{correct_bars});
+                                try log_writer.interface.print("correct bars ratio,{d}\n", .{@as(f32, @floatFromInt(correct_bars)) / val_size_f / bars_per_code_f});
 
-                                try log_writer.print("correct codes,{d}\n", .{correct_codes});
-                                try log_writer.print("correct codes ratio,{d}\n", .{@as(f32, @floatFromInt(correct_codes)) / val_size_f});
+                                try log_writer.interface.print("correct codes,{d}\n", .{correct_codes});
+                                try log_writer.interface.print("correct codes ratio,{d}\n", .{@as(f32, @floatFromInt(correct_codes)) / val_size_f});
                             }
                         },
                     }
-
-                    try buf_writer.flush();
+                    try log_writer.interface.flush();
                 }
 
                 if (iter % config.checkpoint_freq == 0) {
@@ -746,7 +745,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
             .paused => |pause_cp| {
                 cl_alloc.reset(pause_cp);
                 try notifier.buildFromCached(layers);
-                std.time.sleep(std.time.ns_per_ms * 30);
+                std.Thread.sleep(std.time.ns_per_ms * 30);
             },
         }
 
@@ -861,9 +860,10 @@ const Args = struct {
     }
 
     fn help(process_name: []const u8) noreturn {
-        const stdout = std.io.getStdOut();
+        var stdout_buf: [4096]u8 = undefined;
+        var stdout = std.fs.File.stdout().writer(&stdout_buf);
 
-        stdout.writer().print(
+        stdout.interface.print(
             \\USAGE: {s} [ARGS]
             \\
             \\Required args:
@@ -875,6 +875,8 @@ const Args = struct {
             \\--checkpoint: Initial weights to load
             \\
         , .{process_name}) catch {};
+
+        stdout.interface.flush() catch {};
 
         std.process.exit(1);
     }
@@ -897,13 +899,21 @@ pub fn main() !void {
         const config_out = try out_dir.createFile("config.json", .{});
         defer config_out.close();
 
-        try std.json.stringify(config, .{ .whitespace = .indent_2 }, config_out.writer());
+        var writer_buf: [4096]u8 = undefined;
+        var config_writer = config_out.writer(&writer_buf);
+        try std.json.Stringify.value(config, .{ .whitespace = .indent_2 }, &config_writer.interface);
+        try config_writer.interface.flush();
     }
 
     var ui: train_ui.Gui = undefined;
     try ui.initPinned(&allocators, config.network.lr, config.data.batch_size, config.train_target);
 
-    var comms = SharedChannels{};
+    var train_req_buf: [1024]TrainRequest = undefined;
+    var train_response_buf: [1024]TrainResponse = undefined;
+    var comms = SharedChannels{
+        .gui_to_train = .init(&train_req_buf),
+        .train_to_gui = .init(&train_response_buf),
+    };
 
     const train_thread = try std.Thread.spawn(.{}, trainThread, .{ &comms, args.background_dir, config, out_dir, args.checkpoint });
     defer blk: {

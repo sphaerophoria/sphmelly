@@ -101,10 +101,11 @@ pub fn main() !void {
 
     const out_f = try std.fs.cwd().createFile(out_path, .{});
 
-    const writer = out_f.writer();
+    var writer_buf: [4096]u8 = undefined;
+    var writer = out_f.writer(&writer_buf);
 
-    try writer.writeAll("name,");
-    try logBboxHeaders(writer, data);
-    try writer.print("{s},", .{config_path});
-    try logBboxVal(writer, data);
+    try writer.interface.writeAll("name,");
+    try logBboxHeaders(&writer.interface, data);
+    try writer.interface.print("{s},", .{config_path});
+    try logBboxVal(&writer.interface, data);
 }

@@ -22,7 +22,8 @@ pub fn loadCheckpoint(cl_alloc: *cl.Alloc, executor: anytype, spec_path: []const
     const scratch_cp = scratch.checkpoint();
     defer scratch.restore(scratch_cp);
 
-    var json_reader = std.json.reader(scratch.allocator(), spec_f.reader());
+    var spec_f_reader = spec_f.reader(try scratch.allocator().alloc(u8, 4096));
+    var json_reader = std.json.Reader.init(scratch.allocator(), &spec_f_reader.interface);
     const spec = try std.json.parseFromTokenSourceLeaky(Spec, scratch.allocator(), &json_reader, .{});
 
     const bin_path = try std.fmt.allocPrint(scratch.allocator(), "{s}/{s}", .{ std.fs.path.dirname(spec_path).?, spec.weights });
@@ -75,11 +76,8 @@ pub fn write(cl_alloc: *cl.Alloc, executor: anytype, out_dir: std.fs.Dir, name: 
     defer checkpoint.close();
 
     const bin_data = try checkpoint.createFile("data.bin", .{});
-    var bin_data_buf_writer = std.io.bufferedWriter(bin_data.writer());
-
-    var counting_writer = std.io.countingWriter(bin_data_buf_writer.writer());
-
-    const data_writer = counting_writer.writer();
+    var bin_data_buf: [4096]u8 = undefined;
+    var data_writer = bin_data.writer(&bin_data_buf);
 
     const layer_checkpoints = try cl_alloc.heap().alloc([]Buffer, layers.len);
     for (layers, layer_checkpoints) |layer, *layer_out| {
@@ -94,24 +92,27 @@ pub fn write(cl_alloc: *cl.Alloc, executor: anytype, out_dir: std.fs.Dir, name: 
             param_out.* = .{
                 .key = param.key,
                 .dims = param.tensor.dims.inner,
-                .byte_offs = @intCast(counting_writer.bytes_written),
+                .byte_offs = @intCast(data_writer.pos + data_writer.interface.end),
             };
 
             const cp = cl_alloc.checkpoint();
             defer cl_alloc.reset(cp);
 
             const cpu_data = try executor.toCpu(cl_alloc.heap(), cl_alloc, param.tensor);
-            try data_writer.writeAll(std.mem.sliceAsBytes(cpu_data));
+            try data_writer.interface.writeAll(std.mem.sliceAsBytes(cpu_data));
         }
     }
 
-    try bin_data_buf_writer.flush();
+    try data_writer.interface.flush();
 
     const spec_file = try checkpoint.createFile("spec.json", .{});
     defer spec_file.close();
 
-    try std.json.stringify(Spec{
+    var spec_writer_buf: [4096]u8 = undefined;
+    var spec_writer = spec_file.writer(&spec_writer_buf);
+    try std.json.Stringify.value(Spec{
         .layer_checkpoints = layer_checkpoints,
         .weights = "data.bin",
-    }, .{ .whitespace = .indent_2 }, spec_file.writer());
+    }, .{ .whitespace = .indent_2 }, &spec_writer.interface);
+    try spec_writer.interface.flush();
 }

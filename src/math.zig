@@ -96,7 +96,7 @@ pub const TensorDims = struct {
         return .{ .inner = self.inner[0 .. self.len() - 1] };
     }
 
-    pub fn format(self: TensorDims, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: TensorDims, writer: *std.Io.Writer) !void {
         try writer.print("{d}", .{self.inner[0]});
         var it: usize = 1;
         while (it < self.inner.len) {

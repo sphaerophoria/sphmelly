@@ -382,7 +382,7 @@ fn makeBackgroundImgBuf(scratch: sphtud.alloc.LinearAllocator, cl_alloc: *cl.All
     );
 
     while (try it.next()) |entry| {
-        const cwd_rel_path = try std.fmt.allocPrintZ(scratch.allocator(), "{s}/{s}", .{ background_image_dir, entry.name });
+        const cwd_rel_path = try std.fmt.allocPrintSentinel(scratch.allocator(), "{s}/{s}", .{ background_image_dir, entry.name }, 0);
         try image_paths.append(cwd_rel_path);
     }
 
