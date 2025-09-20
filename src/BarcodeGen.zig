@@ -13,6 +13,7 @@ sample_params_kernel: cl.Executor.Kernel,
 generate_blur_kernels_kernel: cl.Executor.Kernel,
 heal_orientations_kernel: cl.Executor.Kernel,
 box_prediction_to_box_kernel: cl.Executor.Kernel,
+box_adjustment_kernel: cl.Executor.Kernel,
 flip_boxes_kernel: cl.Executor.Kernel,
 backgrounds: math.Executor.Tensor,
 background_size: u32,
@@ -20,6 +21,18 @@ background_size: u32,
 const barcode_gen_program_source = math.Executor.downsample_program_content ++ math.Executor.rand_program_content ++ math.Executor.iou_program_content ++ @embedFile("BarcodeGen/generate.cl");
 
 const BarcodeGen = @This();
+
+pub const ExtractParams = struct {
+    extract_size: u32,
+
+    width_err_range: [2]f32,
+    height_err_range: [2]f32,
+    x_err_range: [2]f32,
+    y_err_range: [2]f32,
+    rot_err_range: [2]f32,
+    multisample: u32,
+    dilation: f32,
+};
 
 pub const RandomizationParams = struct {
     x_offs_range: [2]f32,
@@ -44,6 +57,7 @@ pub fn init(scratch: sphtud.alloc.LinearAllocator, cl_alloc: *cl.Alloc, math_exe
     const generate_blur_kernels_kernel = try program.createKernel(cl_alloc, "generate_blur_kernels");
     const heal_orientations_kernel = try program.createKernel(cl_alloc, "heal_orientations");
     const box_prediction_to_box_kernel = try program.createKernel(cl_alloc, "box_prediction_to_box");
+    const box_adjustment_kernel = try program.createKernel(cl_alloc, "box_adjustment");
     const flip_boxes_kernel = try program.createKernel(cl_alloc, "flip_boxes");
 
     const backgrounds = try makeBackgroundImgBuf(scratch, cl_alloc, math_executor, background_image_dir, img_width);
@@ -56,6 +70,7 @@ pub fn init(scratch: sphtud.alloc.LinearAllocator, cl_alloc: *cl.Alloc, math_exe
         .generate_blur_kernels_kernel = generate_blur_kernels_kernel,
         .heal_orientations_kernel = heal_orientations_kernel,
         .box_prediction_to_box_kernel = box_prediction_to_box_kernel,
+        .box_adjustment_kernel = box_adjustment_kernel,
         .flip_boxes_kernel = flip_boxes_kernel,
         .backgrounds = backgrounds,
         .background_size = img_width,
@@ -64,7 +79,6 @@ pub fn init(scratch: sphtud.alloc.LinearAllocator, cl_alloc: *cl.Alloc, math_exe
 
 pub const Bars = struct {
     imgs: math.Executor.Tensor,
-    masks: math.Executor.Tensor,
     box_labels: math.Executor.Tensor,
     bars: math.Executor.Tensor,
 };
@@ -79,6 +93,7 @@ pub const ConfidenceMetric = enum(u8) {
 pub const MakeBarsParams = struct {
     cl_alloc: *cl.Alloc,
     rand_params: RandomizationParams,
+    extract_params: ?ExtractParams = null,
     enable_backgrounds: bool,
     num_images: u32,
     label_in_frame: bool,
@@ -97,9 +112,20 @@ pub fn makeBars(self: BarcodeGen, params: MakeBarsParams) !Bars {
     const pass1_out = try self.runFirstPass(params.cl_alloc, instanced.params_buf, out_dims, params.enable_backgrounds);
     const pass2_out = try self.math_executor.maskedConv(params.cl_alloc, pass1_out.imgs, pass1_out.masks, blur_kernels);
 
+    var out = pass2_out;
+    if (params.extract_params) |extract_params| {
+        out = try self.extractFromBoxes(
+            params.cl_alloc,
+            instanced.box_labels,
+            pass2_out,
+            extract_params,
+            params.rand_source,
+            extract_params.extract_size,
+        );
+    }
+
     return .{
-        .imgs = pass2_out,
-        .masks = pass1_out.masks,
+        .imgs = out,
         .box_labels = instanced.box_labels,
         .bars = sample_buf.no_quiet,
     };
@@ -272,6 +298,46 @@ fn runFirstPass(self: BarcodeGen, cl_alloc: *cl.Alloc, params_buf: math.Executor
         .masks = masks,
         .imgs = imgs,
     };
+}
+
+fn extractFromBoxes(self: BarcodeGen, cl_alloc: *cl.Alloc, box_labels: math.Executor.Tensor, imgs: math.Executor.Tensor, extract_params: ExtractParams, rand_source: *math.RandSource, target_size: u32) !math.Executor.Tensor {
+    const boxes = try self.boxPredictionToBox(cl_alloc, box_labels, extract_params.dilation);
+    const randomized_boxes = try self.math_executor.createTensorUninitialized(cl_alloc, boxes.dims);
+
+    const n = boxes.dims.get(boxes.dims.len() - 1);
+    try self.math_executor.executor.executeKernelUntracked(
+        cl_alloc,
+        self.box_adjustment_kernel,
+        n,
+        &.{
+            .{ .buf = boxes.buf },
+            .{ .buf = randomized_boxes.buf },
+            .{ .float = extract_params.width_err_range[0] },
+            .{ .float = extract_params.width_err_range[1] },
+            .{ .float = extract_params.height_err_range[0] },
+            .{ .float = extract_params.height_err_range[1] },
+            .{ .float = extract_params.x_err_range[0] },
+            .{ .float = extract_params.x_err_range[1] },
+            .{ .float = extract_params.y_err_range[0] },
+            .{ .float = extract_params.y_err_range[1] },
+            .{ .float = extract_params.rot_err_range[0] },
+            .{ .float = extract_params.rot_err_range[1] },
+            .{ .ulong = rand_source.ctr },
+            .{ .uint = rand_source.seed },
+            .{ .uint = n },
+        },
+    );
+
+    rand_source.ctr += n;
+
+    const downsampled = try self.math_executor.downsampleBox(
+        cl_alloc,
+        try self.math_executor.reshape(cl_alloc, imgs, &.{ imgs.dims.get(0), imgs.dims.get(1), 1, n }),
+        randomized_boxes,
+        target_size,
+        extract_params.multisample,
+    );
+    return try self.math_executor.reshape(cl_alloc, downsampled, &.{ target_size, target_size, n });
 }
 
 pub fn boxPredictionToBox(self: BarcodeGen, cl_alloc: *cl.Alloc, boxes: math.Executor.Tensor, dilation: f32) !math.Executor.Tensor {

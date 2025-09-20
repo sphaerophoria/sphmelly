@@ -20,7 +20,6 @@ const CpuImage = tsv.CpuImage;
 const GuiAction = union(enum) {
     request_image_stat: ImagePixelPos,
     selected_image: usize,
-    toggle_mask,
     seed: usize,
 
     fn generateSeed(val: usize) GuiAction {
@@ -59,7 +58,6 @@ const ImageUpdater = struct {
     math_executor: math.Executor,
     image_view: *tsv.ImageView(GuiAction),
     solid_color_renderer: *sphrender.xyt_program.SolidColorProgram,
-    visualize_mask: bool,
     config: Config,
     in_frame: *bool,
 
@@ -114,6 +112,7 @@ const ImageUpdater = struct {
             .{
                 .cl_alloc = self.cl_alloc,
                 .rand_params = self.config.data.rand_params,
+                .extract_params = self.config.data.extract_params,
                 .enable_backgrounds = true,
                 .num_images = self.config.data.batch_size,
                 .label_in_frame = self.config.data.label_in_frame,
@@ -124,8 +123,7 @@ const ImageUpdater = struct {
 
         try self.math_executor.executor.finish();
 
-        const source_img = if (self.visualize_mask) bars.masks else bars.imgs;
-        const cpu_image = try self.tensorToRgbaCpu(source_img);
+        const cpu_image = try self.tensorToRgbaCpu(bars.imgs);
 
         gl.glLineWidth(2.0);
 
@@ -226,8 +224,9 @@ const Config = struct {
         batch_size: u32,
         label_in_frame: bool,
         confidence_metric: BarcodeGen.ConfidenceMetric,
-        img_size: u32,
+        render_size: u32,
         rand_params: BarcodeGen.RandomizationParams,
+        extract_params: ?BarcodeGen.ExtractParams = null,
     },
 };
 
@@ -266,7 +265,7 @@ pub fn main() !void {
 
     const math_executor = try math.Executor.init(&cl_alloc, &cl_executor);
 
-    var barcode_gen = try BarcodeGen.init(allocators.scratch.linear(), &cl_alloc, math_executor, args.background_dir, config.data.img_size);
+    var barcode_gen = try BarcodeGen.init(allocators.scratch.linear(), &cl_alloc, math_executor, args.background_dir, config.data.render_size);
 
     gl.glEnable(gl.GL_SCISSOR_TEST);
     gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA);
@@ -302,7 +301,6 @@ pub fn main() !void {
         .solid_color_renderer = &solid_color_renderer,
         .config = config,
         .seed = 0,
-        .visualize_mask = false,
         .in_frame = &in_frame,
     };
 
@@ -319,8 +317,6 @@ pub fn main() !void {
     try layout.pushWidget(try widget_factory.makeDrag(u64, &image_view_updater.seed, &GuiAction.generateSeed, 1, 5));
     try layout.pushWidget(try widget_factory.makeLabel("selected"));
     try layout.pushWidget(try widget_factory.makeDrag(usize, &image_view_updater.selected_image, &GuiAction.generateSelectedImage, 1, 5));
-    try layout.pushWidget(try widget_factory.makeLabel("Visualize mask"));
-    try layout.pushWidget(try widget_factory.makeCheckbox(&image_view_updater.visualize_mask, GuiAction.toggle_mask));
     try layout.pushWidget(try widget_factory.makeLabel(InFrameLabelRetriever{ .in_frame = &in_frame }));
 
     try layout.pushWidget(image_view.asWidget());
@@ -351,10 +347,6 @@ pub fn main() !void {
             },
             .seed => |val| {
                 image_view_updater.seed = val;
-                try image_view_updater.update();
-            },
-            .toggle_mask => {
-                image_view_updater.visualize_mask = !image_view_updater.visualize_mask;
                 try image_view_updater.update();
             },
         };

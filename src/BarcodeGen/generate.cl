@@ -684,3 +684,46 @@ __kernel void box_prediction_to_box(
     thread_out[3] = thread_in[3] * thread_in[3] * dilation;
     thread_out[4] = atan2(thread_in[5], thread_in[4]);
 }
+
+__kernel void box_adjustment(
+
+        __global float* in,
+        __global float* out,
+        float min_width_err,
+        float max_width_err,
+        float min_height_err,
+        float max_height_err,
+        float min_x_err,
+        float max_x_err,
+        float min_y_err,
+        float max_y_err,
+        float min_rot_err,
+        float max_rot_err,
+        ulong ctr_start,
+        uint seed,
+        uint n
+ ) {
+    // fmt: x, y, w, h, rot
+    // in: (5, n)
+    // out: (5, n)
+
+    uint global_id = get_global_id(0);
+    if (global_id / 5 >= n) return;
+
+    struct philox_thread_rng rng = rngInit(ctr_start + global_id, seed);
+
+    float width_err = randFloatBetween(&rng, min_width_err, max_width_err);
+    float height_err = randFloatBetween(&rng, min_height_err, max_height_err);
+    float x_err = randFloatBetween(&rng, min_x_err, max_x_err);
+    float y_err = randFloatBetween(&rng, min_y_err, max_y_err);
+    float rot_err = randFloatBetween(&rng, min_rot_err, max_rot_err);
+
+    float* thread_in = in + global_id * 5;
+    float* thread_out = out + global_id * 5;
+
+    thread_out[0] = thread_in[0] + x_err;
+    thread_out[1] = thread_in[1] + y_err;
+    thread_out[2] = thread_in[2] + width_err;
+    thread_out[3] = thread_in[3] + height_err;
+    thread_out[4] = thread_in[4] + rot_err;
+}

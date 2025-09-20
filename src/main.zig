@@ -461,10 +461,10 @@ const TrainingInput = struct {
     expected: math.Executor.Tensor,
 };
 
-fn generateTrainingInput(barcode_gen: *BarcodeGen, make_bars_params: BarcodeGen.MakeBarsParams, math_executor: math.Executor, target: Config.TrainTarget, barcode_size: u32) !TrainingInput {
+fn generateTrainingInput(barcode_gen: *BarcodeGen, make_bars_params: BarcodeGen.MakeBarsParams, math_executor: math.Executor, target: Config.TrainTarget) !TrainingInput {
     const bars = try barcode_gen.makeBars(make_bars_params);
 
-    const batch_cl_4d = try math_executor.reshape(make_bars_params.cl_alloc, bars.imgs, &.{ barcode_size, barcode_size, 1, make_bars_params.num_images });
+    const batch_cl_4d = try math_executor.reshape(make_bars_params.cl_alloc, bars.imgs, &.{ bars.imgs.dims.get(0), bars.imgs.dims.get(1), 1, bars.imgs.dims.get(2) });
     const expected = switch (target) {
         .bbox => bars.box_labels,
         .bars => bars.bars,
@@ -543,7 +543,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
         &cl_alloc,
         math_executor,
         background_dir,
-        config.data.img_size,
+        config.data.render_size,
     );
 
     var trainer = nn.Trainer(TrainNotifier){
@@ -572,6 +572,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
         .{
             .cl_alloc = &cl_alloc,
             .rand_params = config.data.val_rand_params,
+            .extract_params = config.data.extract_params,
             .rand_source = &rand_source,
             .num_images = config.val_size,
             .label_in_frame = config.data.label_in_frame,
@@ -580,7 +581,6 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
         },
         math_executor,
         config.train_target,
-        config.data.img_size,
     );
 
     var iter: usize = 0;
@@ -608,6 +608,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                         .cl_alloc = &cl_alloc,
                         .rand_params = config.data.rand_params,
                         .rand_source = &rand_source,
+                        .extract_params = config.data.extract_params,
                         .num_images = config.data.batch_size,
                         .label_in_frame = config.data.label_in_frame,
                         .confidence_metric = config.data.confidence_metric,
@@ -615,7 +616,6 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                     },
                     math_executor,
                     config.train_target,
-                    config.data.img_size,
                 );
 
                 const results = try nn.runLayers(&cl_alloc, train_input.input, layers, &tracing_executor);

@@ -7,9 +7,10 @@ data: struct {
     batch_size: u32,
     label_in_frame: bool,
     confidence_metric: BarcodeGen.ConfidenceMetric,
-    img_size: u32,
+    render_size: u32,
     rand_params: BarcodeGen.RandomizationParams,
     val_rand_params: BarcodeGen.RandomizationParams,
+    extract_params: ?BarcodeGen.ExtractParams = null,
     enable_backgrounds: bool,
 },
 log_freq: u32,
@@ -25,6 +26,14 @@ pub const TrainTarget = enum {
     bbox,
     bars,
 };
+
+pub fn outputSize(self: Config) u32 {
+    if (self.data.extract_params) |ep| {
+        return ep.extract_size;
+    }
+
+    return self.data.render_size;
+}
 
 pub fn parse(leaky: std.mem.Allocator, path: []const u8) !Config {
     const f = try std.fs.cwd().openFile(path, .{});

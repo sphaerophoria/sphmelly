@@ -23,7 +23,7 @@ rand_params = {
 config = {
     "data": {
         "batch_size": batch_size,
-        "img_size": img_size,
+        "render_size": img_size,
         "label_in_frame": False,
         "confidence_metric": "none",
         "rand_params": rand_params,
