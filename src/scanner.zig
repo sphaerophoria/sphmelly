@@ -14,6 +14,7 @@ const math = @import("math.zig");
 const tsv = @import("training_sample_view.zig");
 const nn = @import("nn.zig");
 const nn_checkpoint = @import("nn/checkpoint.zig");
+const bar_comparison_widget = @import("bar_comparison_widget.zig");
 
 const ImagePixelPos = tsv.ImagePixelPos;
 const GlImage = tsv.GlImage;
@@ -21,11 +22,10 @@ const CpuImage = tsv.CpuImage;
 const Config = @import("Config.zig");
 
 const GuiAction = union(enum) {
-    update_displayed_img: u32,
-
-    fn genUpdateDisplayedImg(val: u32) GuiAction {
-        return .{ .update_displayed_img = val };
-    }
+    inspect_img: usize,
+    go_overview,
+    inspect_prev,
+    inspect_next,
 };
 
 const Args = struct {
@@ -143,6 +143,8 @@ const ImageUpdater = struct {
     resampled: math.Executor.Tensor,
     extracted: math.Executor.Tensor,
     extracted_flipped: math.Executor.Tensor,
+    predicted_bars: math.Executor.Tensor,
+    predicted_bars_flipped: math.Executor.Tensor,
     boxes: []const f32,
 
     fn update(self: ImageUpdater, displayed_img_id: u32) !void {
@@ -168,6 +170,26 @@ const ImageUpdater = struct {
             null,
             self.widgets.extracted_flipped_image,
         );
+
+        const expected_cpu = try self.extractCpuTensor(try self.bars.bars.indexOuter(displayed_img_id));
+        try self.widgets.comparison.renderBarComparison(
+            try self.extractCpuTensor(try self.predicted_bars.indexOuter(displayed_img_id)),
+            expected_cpu,
+        );
+
+        try self.widgets.flipped_comparison.renderBarComparison(
+            try self.extractCpuTensor(try self.predicted_bars_flipped.indexOuter(displayed_img_id)),
+            expected_cpu,
+        );
+    }
+
+    fn extractCpuTensor(self: ImageUpdater, slice: math.Executor.TensorSlice) !math.Tensor([]f32) {
+        const deferred = try self.math_executor.sliceToCpuDeferred(self.scratch, self.cl_alloc, slice);
+        try deferred.event.wait();
+        return .{
+            .buf = deferred.val,
+            .dims = slice.dims,
+        };
     }
 
     fn tensorToImgView(self: ImageUpdater, slice: math.Executor.TensorSlice, box: ?[]const f32, img_view: *tsv.ImageView(GuiAction)) !void {
@@ -216,10 +238,70 @@ const Widgets = struct {
     // FIXME: Flipped shouldn't be needed if our model is better
     extracted_flipped_image: *tsv.ImageView(GuiAction),
     solid_color_renderer: *sphrender.xyt_program.SolidColorProgram,
+    comparison: bar_comparison_widget.ComparisonView(GuiAction),
+    flipped_comparison: bar_comparison_widget.ComparisonView(GuiAction),
     root: gui.runner.Runner(GuiAction),
 };
 
-fn buildUi(allocators: anytype, gui_alloc: gui.GuiAlloc, displayed_img_id: *u32) !Widgets {
+const DisplayMode = enum {
+    overview,
+    inspection,
+};
+
+const AppViewRetriever = struct {
+    display_mode: *DisplayMode,
+
+    pub fn get(self: AppViewRetriever) usize {
+        return @intFromEnum(self.display_mode.*);
+    }
+};
+
+const InfoImgIdLabel = struct {
+    displayed_img_info: *usize,
+    infos: []const ImgInfo,
+
+    pub fn getText(self: *InfoImgIdLabel) []const u8 {
+        return self.infos[self.displayed_img_info.*].name;
+    }
+};
+
+const InfoImgCorrectLabel = struct {
+    displayed_img_info: *usize,
+    infos: []const ImgInfo,
+
+    pub fn getText(self: *InfoImgCorrectLabel) []const u8 {
+        return self.infos[self.displayed_img_info.*].correct_label;
+    }
+};
+
+fn boxImageView(widget_factory: gui.widget_factory.WidgetFactory(GuiAction), image_view: *tsv.ImageView(GuiAction)) !gui.Widget(GuiAction) {
+    return try widget_factory.makeBox(
+        image_view.asWidget(),
+        .{ .width = 0, .height = 512 },
+        .fill_width,
+    );
+}
+fn pushImageView(
+    image_layout: *gui.layout.Layout(GuiAction),
+    widget_factory: gui.widget_factory.WidgetFactory(GuiAction),
+    name: []const u8,
+    view: *tsv.ImageView(GuiAction),
+) !void {
+    try image_layout.pushWidget(
+        try widget_factory.makeLabel(name),
+    );
+    try image_layout.pushWidget(
+        try boxImageView(widget_factory, view),
+    );
+}
+
+fn buildUi(
+    allocators: anytype,
+    gui_alloc: gui.GuiAlloc,
+    displayed_img_info: *usize,
+    display_mode: *DisplayMode,
+    infos: []const ImgInfo,
+) !Widgets {
     const gui_state = try gui.widget_factory.widgetState(
         GuiAction,
         gui_alloc,
@@ -229,8 +311,19 @@ fn buildUi(allocators: anytype, gui_alloc: gui.GuiAlloc, displayed_img_id: *u32)
 
     const widget_factory = gui_state.factory(gui_alloc);
     const layout = try widget_factory.makeLayout();
-    try layout.pushWidget(try widget_factory.makeLabel("Image id"));
-    try layout.pushWidget(try widget_factory.makeDrag(u32, displayed_img_id, &GuiAction.genUpdateDisplayedImg, 1, 10));
+    try layout.pushWidget(try widget_factory.makeButton("Overview", GuiAction{ .go_overview = {} }));
+
+    try layout.pushWidget(try widget_factory.makeButton("Prev", GuiAction{ .inspect_prev = {} }));
+    try layout.pushWidget(try widget_factory.makeButton("Next", GuiAction{ .inspect_next = {} }));
+
+    try layout.pushWidget(try widget_factory.makeLabel(InfoImgIdLabel{
+        .displayed_img_info = displayed_img_info,
+        .infos = infos,
+    }));
+    try layout.pushWidget(try widget_factory.makeLabel(InfoImgCorrectLabel{
+        .displayed_img_info = displayed_img_info,
+        .infos = infos,
+    }));
 
     const image_layout = try widget_factory.makeLayout();
     try layout.pushWidget(try widget_factory.makeScrollView(image_layout.asWidget()));
@@ -240,16 +333,62 @@ fn buildUi(allocators: anytype, gui_alloc: gui.GuiAlloc, displayed_img_id: *u32)
     const extracted_image = try makeImageView(gui_alloc, gui_state);
     const extracted_flipped_image = try makeImageView(gui_alloc, gui_state);
 
-    const image_widgets: []const *tsv.ImageView(GuiAction) = &.{ input_image, low_res_image, extracted_image, extracted_flipped_image };
-    for (image_widgets) |view| {
-        try image_layout.pushWidget(
-            try widget_factory.makeBox(
-                view.asWidget(),
-                .{ .width = 0, .height = 512 },
-                .fill_width,
+    const comparison = try bar_comparison_widget.makeComparisonView(GuiAction, widget_factory);
+    const flipped_comparison = try bar_comparison_widget.makeComparisonView(GuiAction, widget_factory);
+
+    try pushImageView(image_layout, widget_factory, "input", input_image);
+    try pushImageView(image_layout, widget_factory, "low_res", low_res_image);
+
+    try image_layout.pushWidget(try widget_factory.makeLabel("extracted"));
+    try image_layout.pushWidget(comparison.widget);
+    try image_layout.pushWidget(try boxImageView(widget_factory, extracted_image));
+
+    try image_layout.pushWidget(try widget_factory.makeLabel("flipped"));
+    try image_layout.pushWidget(flipped_comparison.widget);
+    try image_layout.pushWidget(try boxImageView(widget_factory, extracted_flipped_image));
+
+    const overview_layout = try widget_factory.makeGrid(
+        &.{ .{
+            .width = .{ .ratio = 0.8 },
+            .horizontal_justify = .left,
+            .vertical_justify = .center,
+        }, .{
+            .width = .{ .ratio = 0.2 },
+            .horizontal_justify = .right,
+            .vertical_justify = .center,
+        } },
+        infos.len * 2,
+        infos.len * 2,
+    );
+
+    for (infos, 0..) |info, info_idx| {
+        try overview_layout.pushWidget(
+            try widget_factory.makeInteractable(
+                try widget_factory.makeLabel(info.name),
+                GuiAction{ .inspect_img = info_idx },
+                null,
+            ),
+        );
+        try overview_layout.pushWidget(
+            try widget_factory.makeInteractable(
+                try widget_factory.makeLabel(info.correct_label),
+                GuiAction{ .inspect_img = info_idx },
+                null,
             ),
         );
     }
+
+    const one_of = try widget_factory.makeOneOf(
+        AppViewRetriever{
+            .display_mode = display_mode,
+        },
+        &.{
+            try widget_factory.makeScrollView(try widget_factory.makeFrame(
+                overview_layout.asWidget(),
+            )),
+            layout.asWidget(),
+        },
+    );
 
     return .{
         .input_image = input_image,
@@ -258,8 +397,96 @@ fn buildUi(allocators: anytype, gui_alloc: gui.GuiAlloc, displayed_img_id: *u32)
         // FIXME: Flipped shouldn't be needed if our model is better
         .extracted_flipped_image = extracted_flipped_image,
         .solid_color_renderer = &gui_state.solid_color_renderer,
-        .root = try widget_factory.makeRunner(layout.asWidget()),
+        .comparison = comparison,
+        .flipped_comparison = flipped_comparison,
+        .root = try widget_factory.makeRunner(one_of),
     };
+}
+
+const ImgInfo = struct {
+    name: []const u8,
+    correct_label: []const u8,
+    correct_bars: usize,
+    id: u32,
+
+    fn lessThanCtx(_: void, a: ImgInfo, b: ImgInfo) bool {
+        if (a.correct_bars < b.correct_bars) {
+            return true;
+        } else if (a.correct_bars > b.correct_bars) return false;
+
+        return std.mem.order(u8, a.name, b.name) == .lt;
+    }
+};
+
+const bars_per_img = 95;
+
+fn countCorrectPredictions(
+    predicted: []const f32,
+    expected: []const f32,
+) usize {
+    std.debug.assert(predicted.len == bars_per_img);
+    std.debug.assert(expected.len == bars_per_img);
+    var correct: usize = 0;
+    for (predicted, expected) |p, e| {
+        const predicted_true = p > 0;
+        const expected_true = e > 0.5;
+        if (predicted_true == expected_true) {
+            correct += 1;
+        }
+    }
+    return correct;
+}
+
+fn preprocessImgInfos(
+    out_alloc: std.mem.Allocator,
+    cl_alloc: *cl.Alloc,
+    math_executor: math.Executor,
+    predicted: math.Executor.Tensor,
+    flipped_predicted: math.Executor.Tensor,
+    expected: math.Executor.Tensor,
+    batch_size: usize,
+) ![]const ImgInfo {
+    var img_infos = std.ArrayList(ImgInfo).initBuffer(
+        try out_alloc.alloc(ImgInfo, batch_size),
+    );
+
+    const cp = cl_alloc.checkpoint();
+    defer cl_alloc.reset(cp);
+
+    const predicted_codes_cpu = try math_executor.toCpu(cl_alloc.heap(), cl_alloc, predicted);
+    const predicted_codes_flipped_cpu = try math_executor.toCpu(cl_alloc.heap(), cl_alloc, flipped_predicted);
+    const expected_cpu = try math_executor.toCpu(cl_alloc.heap(), cl_alloc, expected);
+
+    for (0..batch_size) |img_id| {
+        const output_start = img_id * bars_per_img;
+        const output_end = output_start + bars_per_img;
+
+        const correct_bars = countCorrectPredictions(
+            predicted_codes_cpu[output_start..output_end],
+            expected_cpu[output_start..output_end],
+        );
+
+        const correct_flipped = countCorrectPredictions(
+            predicted_codes_flipped_cpu[output_start..output_end],
+            expected_cpu[output_start..output_end],
+        );
+
+        const max_correct = @max(correct_bars, correct_flipped);
+        try img_infos.appendBounded(.{
+            .name = try std.fmt.allocPrint(out_alloc, "img {d:0>3}", .{img_id}),
+            .correct_bars = max_correct,
+            .id = @intCast(img_id),
+            .correct_label = try std.fmt.allocPrint(
+                out_alloc,
+                "{d}/95",
+                .{max_correct},
+            ),
+        });
+    }
+
+    std.mem.sort(ImgInfo, img_infos.items, {}, ImgInfo.lessThanCtx);
+
+    return img_infos.items;
 }
 
 pub fn main() !void {
@@ -310,9 +537,8 @@ pub fn main() !void {
     gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA);
     gl.glEnable(gl.GL_BLEND);
 
-    var displayed_img_id: u32 = 0;
-    const gui_alloc = try allocators.root_render.makeSubAlloc("gui");
-    var widgets = try buildUi(&allocators, gui_alloc, &displayed_img_id);
+    var displayed_img_info: usize = 0;
+    var display_mode = DisplayMode.overview;
 
     var rand_source = math.RandSource{
         .seed = 0,
@@ -359,22 +585,12 @@ pub fn main() !void {
     );
 
     const predicted_codes = try nn.runLayersUntraced(&cl_alloc, extracted, stage2_layers, &math_executor);
-    const predicted_codes_cpu = try math_executor.toCpu(cl_alloc.heap(), &cl_alloc, predicted_codes);
-
     const predicted_codes_flipped = try nn.runLayersUntraced(&cl_alloc, extracted_flipped, stage2_layers, &math_executor);
-    const predicted_codes_flipped_cpu = try math_executor.toCpu(cl_alloc.heap(), &cl_alloc, predicted_codes_flipped);
 
-    for (predicted_codes_cpu[0..95]) |p| {
-        const p_true: u32 = if (p > 0) 1 else 0;
-        std.debug.print("{d} ", .{p_true});
-    }
-    std.debug.print("\n", .{});
+    const img_infos = try preprocessImgInfos(allocators.root.arena(), &cl_alloc, math_executor, predicted_codes, predicted_codes_flipped, bars.bars, stage1_config.data.batch_size);
 
-    for (predicted_codes_flipped_cpu[0..95]) |p| {
-        const p_true: u32 = if (p > 0) 1 else 0;
-        std.debug.print("{d} ", .{p_true});
-    }
-    std.debug.print("\n", .{});
+    const gui_alloc = try allocators.root_render.makeSubAlloc("gui");
+    var widgets = try buildUi(&allocators, gui_alloc, &displayed_img_info, &display_mode, img_infos);
 
     const updater = ImageUpdater{
         .scratch = allocators.scratch.allocator(),
@@ -386,10 +602,12 @@ pub fn main() !void {
         .resampled = resampled,
         .extracted = extracted,
         .extracted_flipped = extracted_flipped,
+        .predicted_bars = predicted_codes,
+        .predicted_bars_flipped = predicted_codes_flipped,
         .boxes = boxes_cpu,
     };
 
-    try updater.update(displayed_img_id);
+    try updater.update(img_infos[displayed_img_info].id);
 
     while (!window.closed()) {
         allocators.resetScratch();
@@ -398,6 +616,8 @@ pub fn main() !void {
         gl.glViewport(0, 0, @intCast(width), @intCast(height));
         gl.glScissor(0, 0, @intCast(width), @intCast(height));
 
+        const background_color = gui.widget_factory.StyleColors.background_color;
+        gl.glClearColor(background_color.r, background_color.g, background_color.b, background_color.a);
         gl.glClear(gl.GL_COLOR_BUFFER_BIT);
 
         const response = try widgets.root.step(1.0, .{
@@ -406,13 +626,21 @@ pub fn main() !void {
         }, &window.queue);
 
         if (response.action) |a| switch (a) {
-            .update_displayed_img => |val| {
-                const last_dim = bars.imgs.dims.len() - 1;
-                const num_images = bars.imgs.dims.get(last_dim);
-                const last_idx = num_images - 1;
-                displayed_img_id = std.math.clamp(val, 0, last_idx);
-
-                try updater.update(displayed_img_id);
+            .inspect_img => |val| {
+                display_mode = .inspection;
+                displayed_img_info = val;
+                try updater.update(img_infos[displayed_img_info].id);
+            },
+            .inspect_prev => {
+                displayed_img_info -|= 1;
+                try updater.update(img_infos[displayed_img_info].id);
+            },
+            .inspect_next => {
+                displayed_img_info = @min(displayed_img_info + 1, stage1_config.data.batch_size - 1);
+                try updater.update(img_infos[displayed_img_info].id);
+            },
+            .go_overview => {
+                display_mode = .overview;
             },
         };
         window.swapBuffers();
