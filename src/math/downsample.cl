@@ -81,7 +81,8 @@ __kernel void downsample_box_inner(
         uint in_h,
         uint channels,
         uint num_images,
-        uint out_size
+        uint out_size,
+        uint num_samples_1d
 ) {
     // in_imgs (in_w, in_h, channels, num_images)
     // out_imgs (out_size, out_size, channels, num_images)
@@ -93,42 +94,55 @@ __kernel void downsample_box_inner(
     uint out_y = (global_id % out_channel_size) / out_size;
     uint channel = global_id / out_channel_size;
 
-    float x_norm = (float)out_x / (float)out_size;
-    float y_norm = (float)out_y / (float)out_size;
+    float sum = 0.0f;
 
-    // Output space, x, y pixel in out img
-    // normalized space, x,y pixel in out img normlaized from [0,1]
-    // box space, x,y pixel but relative to rotated space
-    // in img space, take box space and unrotated and offset
+    for (int i = 0; i < num_samples_1d; i++) {
+        float x_offs = (1.0f / num_samples_1d / 2.0f) + (float)i / num_samples_1d - 0.5;
+        for (int j = 0; j < num_samples_1d; j++) {
+            float y_offs = (1.0f / num_samples_1d / 2.0f) + (float)j / num_samples_1d - 0.5;
 
-    // Relative to box center, which box pixel do we want
+            float x_norm = ((float)out_x + x_offs) / (float)out_size;
+            float y_norm = ((float)out_y + y_offs) / (float)out_size;
 
-    if (in_w != in_h) {
-        out_imgs[global_id] = INFINITY;
-        return;
+            // Output space, x, y pixel in out img
+            // normalized space, x,y pixel in out img normlaized from [0,1]
+            // box space, x,y pixel but relative to rotated space
+            // in img space, take box space and unrotated and offset
+
+            // Relative to box center, which box pixel do we want
+
+            if (in_w != in_h) {
+                out_imgs[global_id] = INFINITY;
+                return;
+            }
+
+            float x_box = (x_norm - 0.5) * box.w * in_w;
+            float y_box = (y_norm - 0.5) * box.h * in_w;
+
+            float2 box_x_axis = {cos(box.r), sin(box.r)};
+            float2 box_y_axis = {-box_x_axis[1], box_x_axis[0]};
+
+            float2 in_box_center = {box.x * in_w + (float)in_w / 2.0f, box.y * in_h + (float)in_h / 2.0f};
+
+            float2 in_px = in_box_center + box_x_axis * x_box + box_y_axis * y_box;
+
+            uint in_channel_size = in_w * in_h;
+
+            uint in_channel_offs = (uint)in_px[1] * in_w + (uint)in_px[0];
+            bool in_bounds = in_px[0] >= 0 && in_px[0] < in_w && in_px[1] < in_h && in_px[1] >= 0;
+            sum += (in_bounds)
+                ? in_imgs[channel * in_channel_size + in_channel_offs]
+                : 0.0;
+        }
     }
 
-    float x_box = (x_norm - 0.5) * box.w * in_w;
-    float y_box = (y_norm - 0.5) * box.h * in_w;
-
-    float2 box_x_axis = {cos(box.r), sin(box.r)};
-    float2 box_y_axis = {-box_x_axis[1], box_x_axis[0]};
-
-    float2 in_box_center = {box.x * in_w + (float)in_w / 2.0f, box.y * in_h + (float)in_h / 2.0f};
-
-    float2 in_px = in_box_center + box_x_axis * x_box + box_y_axis * y_box;
-
-    uint in_channel_size = in_w * in_h;
-
-    uint in_channel_offs = (uint)in_px[1] * in_w + (uint)in_px[0];
-    out_imgs[global_id] = (in_channel_offs < in_w * in_h)
-        ? in_imgs[channel * in_channel_size + in_channel_offs]
-        : 0.0;
+    out_imgs[global_id] = sum / num_samples_1d / num_samples_1d;
 }
 
 __kernel void downsample(
         __global float* in_imgs,
         __global float* out_imgs,
+        uint multisample,
         uint in_w,
         uint in_h,
         uint channels,
@@ -153,7 +167,8 @@ __kernel void downsample(
         in_h,
         channels,
         num_images,
-        out_size
+        out_size,
+        multisample
     );
 }
 
@@ -161,6 +176,7 @@ __kernel void downsample_box(
         __global float* in_imgs,
         __global float* out_imgs,
         __global float* boxes,
+        uint multisample,
         uint in_w,
         uint in_h,
         uint channels,
@@ -195,6 +211,7 @@ __kernel void downsample_box(
         in_h,
         channels,
         num_images,
-        out_size
+        out_size,
+        multisample
     );
 }

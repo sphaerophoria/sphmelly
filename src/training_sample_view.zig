@@ -68,6 +68,7 @@ pub fn makeOrientationBuffer(gl_alloc: *sphrender.GlAlloc, orientation: [2]f32, 
 pub const ImageRenderContext = struct {
     fbo: sphrender.FramebufferRenderContext,
     temporary_viewport: sphrender.TemporaryViewport,
+    temporary_scissor: sphrender.TemporaryScissor,
 
     pub fn init(image: GlImage) !ImageRenderContext {
         const fbo = try sphrender.FramebufferRenderContext.init(image.tex, null);
@@ -76,14 +77,19 @@ pub const ImageRenderContext = struct {
         const temporary_viewport = sphrender.TemporaryViewport.init();
         temporary_viewport.setViewport(@intCast(image.width), @intCast(image.height));
 
+        const temporary_scissor = sphrender.TemporaryScissor.init();
+        temporary_scissor.setAbsolute(0, 0, @intCast(image.width), @intCast(image.height));
+
         return .{
             .fbo = fbo,
             .temporary_viewport = temporary_viewport,
+            .temporary_scissor = temporary_scissor,
         };
     }
 
     pub fn reset(self: ImageRenderContext) void {
         self.temporary_viewport.reset();
+        self.temporary_scissor.reset();
         self.fbo.reset();
     }
 };

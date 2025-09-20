@@ -489,6 +489,12 @@ fn preprocessImgInfos(
     return img_infos.items;
 }
 
+// Tuned to make sense, it would be better if the downsampling code
+// automatically determined what good blur/multisampling params made sense, but
+// since it does not, and it matters, we pick some and pass them along
+const stage1_multisample = 1;
+const stage2_multisample = 4;
+
 pub fn main() !void {
     var allocators: sphrender.AppAllocators(100) = undefined;
     try allocators.initPinned(50 * 1024 * 1024);
@@ -553,6 +559,7 @@ pub fn main() !void {
         &cl_alloc,
         reshaped_bars,
         stage1_config.data.img_size,
+        stage1_multisample,
     );
 
     const initializers = nn.makeInitializers(&math_executor, &rand_source);
@@ -575,6 +582,7 @@ pub fn main() !void {
         reshaped_bars,
         boxes,
         stage2_config.data.img_size,
+        stage2_multisample,
     );
 
     const extracted_flipped = try math_executor.downsampleBox(
@@ -582,6 +590,7 @@ pub fn main() !void {
         reshaped_bars,
         flipped_boxes,
         stage2_config.data.img_size,
+        stage2_multisample,
     );
 
     const predicted_codes = try nn.runLayersUntraced(&cl_alloc, extracted, stage2_layers, &math_executor);

@@ -1076,7 +1076,24 @@ pub fn calcIou(self: Executor, cl_alloc: *cl.Alloc, as: Tensor, bs: Tensor) !Ten
     return ret;
 }
 
-pub fn downsample(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, target_size: u32) !Tensor {
+fn makeBlurryForDownsample(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, target_size: u32) !Tensor {
+    const kernel_size = @max(in.dims.get(0), in.dims.get(1)) / target_size;
+    const kernel_size_f: f32 = @floatFromInt(kernel_size);
+    return if (kernel_size > 0) blk: {
+        const blur_kernel = try self.createTensorUninitialized(cl_alloc, &.{ kernel_size, kernel_size, 1, 1 });
+        try self.executor.executeKernelUntracked(cl_alloc, self.make_downsample_kernel_kernel, kernel_size * kernel_size, &.{
+            .{ .buf = blur_kernel.buf },
+            .{ .uint = kernel_size },
+            // Manually fiddled till images looked about right, relatively
+            // arbitrary stddev
+            .{ .float = kernel_size_f },
+        });
+
+        break :blk try self.convMany(cl_alloc, in, blur_kernel);
+    } else in;
+}
+
+pub fn downsample(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, target_size: u32, multisample: u32) !Tensor {
     // in: (w, h, c, n)
     // out: (s, s, c, n)
 
@@ -1089,25 +1106,12 @@ pub fn downsample(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, target_size: 
     const cp = cl_alloc.checkpoint();
     defer cl_alloc.reset(cp);
 
-    const kernel_size = @max(in.dims.get(0), in.dims.get(1)) / target_size;
-    const kernel_size_f: f32 = @floatFromInt(kernel_size);
-    const blurry = if (kernel_size > 0) blk: {
-        const blur_kernel = try self.createTensorUninitialized(cl_alloc, &.{ kernel_size, kernel_size, 1, 1 });
-        try self.executor.executeKernelUntracked(cl_alloc, self.make_downsample_kernel_kernel, kernel_size * kernel_size, &.{
-            .{ .buf = blur_kernel.buf },
-            .{ .uint = kernel_size },
-            // Manually fiddled till images looked about right, relatively
-            // arbitrary stddev
-            .{ .float = kernel_size_f },
-        });
-
-        break :blk try self.convMany(cl_alloc, in, blur_kernel);
-    } else in;
-
+    const blurry = try self.makeBlurryForDownsample(cl_alloc, in, target_size);
     const n = ret.dims.numElems();
     try self.executor.executeKernelUntracked(cl_alloc, self.downsample_kernel, n, &.{
         .{ .buf = blurry.buf },
         .{ .buf = ret.buf },
+        .{ .uint = multisample },
         .{ .uint = in.dims.get(0) },
         .{ .uint = in.dims.get(1) },
         .{ .uint = in.dims.get(2) },
@@ -1118,7 +1122,7 @@ pub fn downsample(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, target_size: 
     return ret;
 }
 
-pub fn downsampleBox(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, boxes: Tensor, target_size: u32) !Tensor {
+pub fn downsampleBox(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, boxes: Tensor, target_size: u32, multisample: u32) !Tensor {
     // in: (w, h, c, n)
     // out: (s, s, c, n)
 
@@ -1140,11 +1144,14 @@ pub fn downsampleBox(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, boxes: Ten
 
     const ret = try self.createTensorUninitialized(cl_alloc, &.{ target_size, target_size, in.dims.get(2), in.dims.get(3) });
 
+    const blurry = try self.makeBlurryForDownsample(cl_alloc, in, target_size);
+
     const n = ret.dims.numElems();
     try self.executor.executeKernelUntracked(cl_alloc, self.downsample_box_kernel, n, &.{
-        .{ .buf = in.buf },
+        .{ .buf = blurry.buf },
         .{ .buf = ret.buf },
         .{ .buf = boxes.buf },
+        .{ .uint = multisample },
         .{ .uint = in.dims.get(0) },
         .{ .uint = in.dims.get(1) },
         .{ .uint = in.dims.get(2) },

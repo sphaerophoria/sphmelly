@@ -36,6 +36,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const check = b.option(bool, "check", "check") orelse false;
+    const extras = b.option(bool, "extras", "extras") orelse false;
 
     const sphtud = b.dependency("sphtud", .{
         .with_gl = true,
@@ -93,6 +94,16 @@ pub fn build(b: *std.Build) void {
     });
     addCommonDependencies(b, scanner, sphtud_mod);
 
+    const downsample_test = b.addExecutable(.{
+        .name = "downsample_test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/downsample_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    addCommonDependencies(b, downsample_test, sphtud_mod);
+
     const gen_validation_stats = b.addExecutable(.{
         .name = "gen_validation_stats",
         .root_module = b.createModule(.{
@@ -126,7 +137,10 @@ pub fn build(b: *std.Build) void {
     install(b, check, exe);
     install(b, check, imagegen);
     install(b, check, train_output_vis);
-    install(b, check, iou_demo);
     install(b, check, scanner);
     install(b, check, gen_validation_stats);
+    if (extras) {
+        install(b, check, iou_demo);
+        install(b, check, downsample_test);
+    }
 }
