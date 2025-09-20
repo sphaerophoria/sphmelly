@@ -72,7 +72,7 @@ pub fn main() !void {
         &cl_alloc,
         math_executor,
         background_dir,
-        config.data.img_size,
+        config.data.render_size,
     );
 
     const bars = try barcode_gen.makeBars(.{
@@ -83,11 +83,13 @@ pub fn main() !void {
         .label_in_frame = config.data.label_in_frame,
         .rand_source = &rand_source,
         .confidence_metric = config.data.confidence_metric,
+        .output_size = config.data.output_size,
+        .extract_params = null,
     });
 
     const results = try nn.runLayersUntraced(
         &cl_alloc,
-        try math_executor.reshape(&cl_alloc, bars.imgs, &.{ config.data.img_size, config.data.img_size, 1, config.val_size }),
+        try math_executor.reshape(&cl_alloc, bars.imgs, &.{ config.data.output_size, config.data.output_size, 1, config.val_size }),
         layers,
         &math_executor,
     );

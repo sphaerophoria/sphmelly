@@ -118,6 +118,7 @@ pub fn main() !void {
     const barcode_gen = try BarcodeGen.init(allocators.scratch.linear(), &cl_alloc, math_executor, "backgrounds3", 1024);
     const bars = try barcode_gen.makeBars(.{
         .cl_alloc = &cl_alloc,
+        .extract_params = null,
         .rand_params = .{
             .x_offs_range = .{ 0, 0 },
             .y_offs_range = .{ 0, 0 },
@@ -134,6 +135,7 @@ pub fn main() !void {
         },
         .enable_backgrounds = true,
         .num_images = 1,
+        .output_size = 1024,
         .label_in_frame = false,
         .confidence_metric = .none,
         .rand_source = &rand_source,

@@ -543,7 +543,7 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
         &cl_alloc,
         math_executor,
         background_dir,
-        config.data.img_size,
+        config.data.render_size,
     );
 
     var trainer = nn.Trainer(TrainNotifier){
@@ -572,15 +572,17 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
         .{
             .cl_alloc = &cl_alloc,
             .rand_params = config.data.val_rand_params,
+            .extract_params = config.data.extract_params,
             .rand_source = &rand_source,
             .num_images = config.val_size,
             .label_in_frame = config.data.label_in_frame,
             .confidence_metric = config.data.confidence_metric,
             .enable_backgrounds = config.data.enable_backgrounds,
+            .output_size = config.data.output_size,
         },
         math_executor,
         config.train_target,
-        config.data.img_size,
+        config.data.output_size,
     );
 
     var iter: usize = 0;
@@ -608,14 +610,16 @@ fn trainThread(channels: *SharedChannels, background_dir: []const u8, config: Co
                         .cl_alloc = &cl_alloc,
                         .rand_params = config.data.rand_params,
                         .rand_source = &rand_source,
+                        .extract_params = config.data.extract_params,
                         .num_images = config.data.batch_size,
                         .label_in_frame = config.data.label_in_frame,
                         .confidence_metric = config.data.confidence_metric,
                         .enable_backgrounds = config.data.enable_backgrounds,
+                        .output_size = config.data.output_size,
                     },
                     math_executor,
                     config.train_target,
-                    config.data.img_size,
+                    config.data.output_size,
                 );
 
                 const results = try nn.runLayers(&cl_alloc, train_input.input, layers, &tracing_executor);

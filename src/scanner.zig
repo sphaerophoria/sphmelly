@@ -532,10 +532,10 @@ pub fn main() !void {
     var math_executor = try math.Executor.init(&cl_alloc, &cl_executor);
 
     const rand_params = &stage1_config.data.rand_params;
-    rand_params.x_offs_range[0] = rand_params.x_offs_range[0] * high_res_resolution / asf32(stage1_config.data.img_size);
-    rand_params.x_offs_range[1] = rand_params.x_offs_range[1] * high_res_resolution / asf32(stage1_config.data.img_size);
-    rand_params.y_offs_range[0] = rand_params.y_offs_range[0] * high_res_resolution / asf32(stage1_config.data.img_size);
-    rand_params.y_offs_range[1] = rand_params.y_offs_range[1] * high_res_resolution / asf32(stage1_config.data.img_size);
+    rand_params.x_offs_range[0] = rand_params.x_offs_range[0] * high_res_resolution / asf32(stage1_config.data.render_size);
+    rand_params.x_offs_range[1] = rand_params.x_offs_range[1] * high_res_resolution / asf32(stage1_config.data.render_size);
+    rand_params.y_offs_range[0] = rand_params.y_offs_range[0] * high_res_resolution / asf32(stage1_config.data.render_size);
+    rand_params.y_offs_range[1] = rand_params.y_offs_range[1] * high_res_resolution / asf32(stage1_config.data.render_size);
 
     var barcode_gen = try BarcodeGen.init(allocators.scratch.linear(), &cl_alloc, math_executor, args.background_dir, high_res_resolution);
 
@@ -551,14 +551,16 @@ pub fn main() !void {
         .ctr = 0,
     };
 
-    var bars = try barcode_gen.makeBars(.{ .cl_alloc = &cl_alloc, .rand_params = stage1_config.data.rand_params, .enable_backgrounds = stage1_config.data.enable_backgrounds, .num_images = stage1_config.data.batch_size, .label_in_frame = stage1_config.data.label_in_frame, .confidence_metric = stage1_config.data.confidence_metric, .rand_source = &rand_source });
+    var bars = try barcode_gen.makeBars(
+        .{ .cl_alloc = &cl_alloc, .rand_params = stage1_config.data.rand_params, .extract_params = stage1_config.data.extract_params, .enable_backgrounds = stage1_config.data.enable_backgrounds, .num_images = stage1_config.data.batch_size, .label_in_frame = stage1_config.data.label_in_frame, .confidence_metric = stage1_config.data.confidence_metric, .rand_source = &rand_source, .output_size = high_res_resolution },
+    );
 
     const reshaped_bars = try math_executor.reshape(&cl_alloc, bars.imgs, &.{ bars.imgs.dims.get(0), bars.imgs.dims.get(1), 1, bars.imgs.dims.get(2) });
 
     const resampled = try math_executor.downsample(
         &cl_alloc,
         reshaped_bars,
-        stage1_config.data.img_size,
+        stage1_config.data.output_size,
         stage1_multisample,
     );
 
@@ -581,7 +583,7 @@ pub fn main() !void {
         &cl_alloc,
         reshaped_bars,
         boxes,
-        stage2_config.data.img_size,
+        stage2_config.data.output_size,
         stage2_multisample,
     );
 
@@ -589,7 +591,7 @@ pub fn main() !void {
         &cl_alloc,
         reshaped_bars,
         flipped_boxes,
-        stage2_config.data.img_size,
+        stage2_config.data.output_size,
         stage2_multisample,
     );
 
