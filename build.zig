@@ -24,9 +24,18 @@ fn addCommonDependencies(b: *std.Build, exe: *std.Build.Step.Compile, sphtud_mod
     exe.linkLibC();
 }
 
+fn install(b: *std.Build, check: bool, exe: *std.Build.Step.Compile) void {
+    if (check) {
+        b.getInstallStep().dependOn(&exe.step);
+    } else {
+        b.installArtifact(exe);
+    }
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const check = b.option(bool, "check", "check") orelse false;
 
     const sphtud = b.dependency("sphtud", .{
         .with_gl = true,
@@ -113,11 +122,11 @@ pub fn build(b: *std.Build) void {
         .root_source_file = bce_test_data,
     });
 
-    b.installArtifact(test_exe);
-    b.installArtifact(exe);
-    b.installArtifact(imagegen);
-    b.installArtifact(train_output_vis);
-    b.installArtifact(iou_demo);
-    b.installArtifact(scanner);
-    b.installArtifact(gen_validation_stats);
+    install(b, check, test_exe);
+    install(b, check, exe);
+    install(b, check, imagegen);
+    install(b, check, train_output_vis);
+    install(b, check, iou_demo);
+    install(b, check, scanner);
+    install(b, check, gen_validation_stats);
 }
