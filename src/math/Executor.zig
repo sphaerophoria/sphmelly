@@ -1122,7 +1122,7 @@ pub fn downsample(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, target_size: 
     return ret;
 }
 
-pub fn downsampleBox(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, boxes: Tensor, target_size: u32, multisample: u32) !Tensor {
+pub fn downsampleBox(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, boxes: Tensor, target_width: u32, target_height: u32, multisample: u32) !Tensor {
     // in: (w, h, c, n)
     // out: (s, s, c, n)
 
@@ -1142,9 +1142,9 @@ pub fn downsampleBox(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, boxes: Ten
         return error.InvalidDims;
     }
 
-    const ret = try self.createTensorUninitialized(cl_alloc, &.{ target_size, target_size, in.dims.get(2), in.dims.get(3) });
+    const ret = try self.createTensorUninitialized(cl_alloc, &.{ target_width, target_height, in.dims.get(2), in.dims.get(3) });
 
-    const blurry = try self.makeBlurryForDownsample(cl_alloc, in, target_size);
+    const blurry = try self.makeBlurryForDownsample(cl_alloc, in, target_width);
 
     const n = ret.dims.numElems();
     try self.executor.executeKernelUntracked(cl_alloc, self.downsample_box_kernel, n, &.{
@@ -1156,7 +1156,8 @@ pub fn downsampleBox(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, boxes: Ten
         .{ .uint = in.dims.get(1) },
         .{ .uint = in.dims.get(2) },
         .{ .uint = in.dims.get(3) },
-        .{ .uint = target_size },
+        .{ .uint = target_width },
+        .{ .uint = target_height },
     });
 
     return ret;

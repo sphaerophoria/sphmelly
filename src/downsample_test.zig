@@ -270,7 +270,7 @@ pub fn main() !void {
 
                 const cl_box = try box_1.toCl(&cl_alloc, math_executor);
                 const bars_reshaped = try math_executor.reshape(&cl_alloc, bars.imgs, &.{ 1024, 1024, 1, 1 });
-                const downsampled = try math_executor.downsampleBox(&cl_alloc, bars_reshaped, cl_box, 400, 4);
+                const downsampled = try math_executor.downsampleBox(&cl_alloc, bars_reshaped, cl_box, 400, 400, 4);
 
                 {
                     const img_cpu_buf = try math_executor.toCpu(allocators.scratch.allocator(), &cl_alloc, downsampled);

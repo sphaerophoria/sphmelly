@@ -81,17 +81,18 @@ __kernel void downsample_box_inner(
         uint in_h,
         uint channels,
         uint num_images,
-        uint out_size,
+        uint out_width,
+        uint out_height,
         uint num_samples_1d
 ) {
     // in_imgs (in_w, in_h, channels, num_images)
-    // out_imgs (out_size, out_size, channels, num_images)
+    // out_imgs (out_width, out_height, channels, num_images)
 
-    uint out_channel_size = out_size * out_size;
+    uint out_channel_size = out_width * out_height;
     // (out_w, out_h, c, n)
     // But we can view it as (out_w, out_h, c * n) with no consequence :)
-    uint out_x = global_id % out_size;
-    uint out_y = (global_id % out_channel_size) / out_size;
+    uint out_x = global_id % out_width;
+    uint out_y = (global_id % out_channel_size) / out_width;
     uint channel = global_id / out_channel_size;
 
     float sum = 0.0f;
@@ -101,8 +102,8 @@ __kernel void downsample_box_inner(
         for (int j = 0; j < num_samples_1d; j++) {
             float y_offs = (1.0f / num_samples_1d / 2.0f) + (float)j / num_samples_1d - 0.5;
 
-            float x_norm = ((float)out_x + x_offs) / (float)out_size;
-            float y_norm = ((float)out_y + y_offs) / (float)out_size;
+            float x_norm = ((float)out_x + x_offs) / (float)out_width;
+            float y_norm = ((float)out_y + y_offs) / (float)out_height;
 
             // Output space, x, y pixel in out img
             // normalized space, x,y pixel in out img normlaized from [0,1]
@@ -168,6 +169,7 @@ __kernel void downsample(
         channels,
         num_images,
         out_size,
+        out_size,
         multisample
     );
 }
@@ -181,20 +183,21 @@ __kernel void downsample_box(
         uint in_h,
         uint channels,
         uint num_images,
-        uint out_size
+        uint out_width,
+        uint out_height
 ) {
     // in_imgs (in_w, in_h, channels, num_images)
-    // out_imgs (out_size, out_size, channels, num_images)
+    // out_imgs (out_width, out_height, channels, num_images)
     //
     // x_offs,y_offs,width,height,angle
     // boxes (5, num_images)
 
     uint global_id = get_global_id(0);
-    if (global_id >= out_size * out_size * channels * num_images) {
+    if (global_id >= out_width * out_height * channels * num_images) {
         return;
     }
 
-    __global float* thread_box_data = boxes + global_id / out_size / out_size / channels * 5;
+    __global float* thread_box_data = boxes + global_id / out_width / out_height / channels * 5;
     struct downsample_box box = {
         thread_box_data[0],
         thread_box_data[1],
@@ -211,7 +214,8 @@ __kernel void downsample_box(
         in_h,
         channels,
         num_images,
-        out_size,
+        out_width,
+        out_height,
         multisample
     );
 }

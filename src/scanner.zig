@@ -592,7 +592,8 @@ pub fn main() !void {
         &cl_alloc,
         reshaped_bars,
         boxes,
-        stage2_config.outputSize(),
+        stage2_config.outputWidth(),
+        stage2_config.outputHeight(),
         stage2_multisample,
     );
 
@@ -600,7 +601,8 @@ pub fn main() !void {
         &cl_alloc,
         reshaped_bars,
         flipped_boxes,
-        stage2_config.outputSize(),
+        stage2_config.outputWidth(),
+        stage2_config.outputHeight(),
         stage2_multisample,
     );
 

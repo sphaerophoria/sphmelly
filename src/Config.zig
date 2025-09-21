@@ -27,9 +27,17 @@ pub const TrainTarget = enum {
     bars,
 };
 
-pub fn outputSize(self: Config) u32 {
+pub fn outputWidth(self: Config) u32 {
     if (self.data.extract_params) |ep| {
-        return ep.extract_size;
+        return ep.extract_width;
+    }
+
+    return self.data.render_size;
+}
+
+pub fn outputHeight(self: Config) u32 {
+    if (self.data.extract_params) |ep| {
+        return ep.extract_height;
     }
 
     return self.data.render_size;

@@ -23,7 +23,8 @@ const barcode_gen_program_source = math.Executor.downsample_program_content ++ m
 const BarcodeGen = @This();
 
 pub const ExtractParams = struct {
-    extract_size: u32,
+    extract_width: u32,
+    extract_height: u32,
 
     width_err_range: [2]f32,
     height_err_range: [2]f32,
@@ -120,7 +121,8 @@ pub fn makeBars(self: BarcodeGen, params: MakeBarsParams) !Bars {
             pass2_out,
             extract_params,
             params.rand_source,
-            extract_params.extract_size,
+            extract_params.extract_width,
+            extract_params.extract_height,
         );
     }
 
@@ -300,7 +302,7 @@ fn runFirstPass(self: BarcodeGen, cl_alloc: *cl.Alloc, params_buf: math.Executor
     };
 }
 
-fn extractFromBoxes(self: BarcodeGen, cl_alloc: *cl.Alloc, box_labels: math.Executor.Tensor, imgs: math.Executor.Tensor, extract_params: ExtractParams, rand_source: *math.RandSource, target_size: u32) !math.Executor.Tensor {
+fn extractFromBoxes(self: BarcodeGen, cl_alloc: *cl.Alloc, box_labels: math.Executor.Tensor, imgs: math.Executor.Tensor, extract_params: ExtractParams, rand_source: *math.RandSource, target_width: u32, target_height: u32) !math.Executor.Tensor {
     const boxes = try self.boxPredictionToBox(cl_alloc, box_labels, extract_params.dilation);
     const randomized_boxes = try self.math_executor.createTensorUninitialized(cl_alloc, boxes.dims);
 
@@ -334,10 +336,11 @@ fn extractFromBoxes(self: BarcodeGen, cl_alloc: *cl.Alloc, box_labels: math.Exec
         cl_alloc,
         try self.math_executor.reshape(cl_alloc, imgs, &.{ imgs.dims.get(0), imgs.dims.get(1), 1, n }),
         randomized_boxes,
-        target_size,
+        target_width,
+        target_height,
         extract_params.multisample,
     );
-    return try self.math_executor.reshape(cl_alloc, downsampled, &.{ target_size, target_size, n });
+    return try self.math_executor.reshape(cl_alloc, downsampled, &.{ target_width, target_height, n });
 }
 
 pub fn boxPredictionToBox(self: BarcodeGen, cl_alloc: *cl.Alloc, boxes: math.Executor.Tensor, dilation: f32) !math.Executor.Tensor {
