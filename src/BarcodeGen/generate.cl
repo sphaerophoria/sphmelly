@@ -686,7 +686,6 @@ __kernel void box_prediction_to_box(
 }
 
 __kernel void box_adjustment(
-
         __global float* in,
         __global float* out,
         float min_width_err,
@@ -708,7 +707,7 @@ __kernel void box_adjustment(
     // out: (5, n)
 
     uint global_id = get_global_id(0);
-    if (global_id / 5 >= n) return;
+    if (global_id >= n) return;
 
     struct philox_thread_rng rng = rngInit(ctr_start + global_id, seed);
 
