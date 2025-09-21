@@ -41,25 +41,25 @@ config = {
         "layers": [
             { "conv": ["he", 3, 3, 1, 4] },
             { "relu": 0.1 },
-            { "maxpool": 2 },
+            { "maxpool": [2, 2] },
 
             { "conv": ["he", 3, 3, 4, 4] },
             { "relu": 0.1 },
             { "conv": ["he", 1, 1, 4, 4] },
             { "relu": 0.1 },
-            { "maxpool": 2 },
+            { "maxpool": [2, 2] },
 
             { "conv": ["he", 3, 3, 4, 4] },
             { "relu": 0.1 },
             { "conv": ["he", 1, 1, 4, 4] },
             { "relu": 0.1 },
-            { "maxpool": 2 },
+            { "maxpool": [2, 2] },
 
             { "conv": ["he", 3, 3, 4, 4] },
             { "relu": 0.1 },
             { "conv": ["he", 1, 1, 4, 4] },
             { "relu": 0.1 },
-            { "maxpool": 2 },
+            { "maxpool": [2, 2] },
 
             { "conv": ["he", 3, 3, 4, 4] },
             { "relu": 0.1 },

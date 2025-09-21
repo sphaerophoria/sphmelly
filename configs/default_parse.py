@@ -41,7 +41,7 @@ config = {
         "layers": [
             { "conv": ["he", 3, 3, 1, 4] },
             { "relu": 0.1 },
-            { "maxpool": 2 },
+            { "maxpool": [2, 2] },
 
             { "conv": ["he", 3, 3, 4, 8] },
             { "relu": 0.1 },
@@ -49,7 +49,7 @@ config = {
             { "relu": 0.1 },
             { "conv": ["he", 3, 3, 4, 8] },
             { "relu": 0.1 },
-            { "maxpool": 2 },
+            { "maxpool": [2, 2] },
 
             { "conv": ["he", 1, 1, 8, 4] },
             { "relu": 0.1 },

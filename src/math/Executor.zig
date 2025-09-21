@@ -980,15 +980,15 @@ pub fn hasNan(self: Executor, scratch_alloc: *cl.Alloc, in: Tensor) !bool {
     return std.math.isNan(read_res.val[0]);
 }
 
-pub fn maxpool(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, stride: u32) !Tensor {
+pub fn maxpool(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, x_stride: u32, y_stride: u32) !Tensor {
     // in: (w, h, c, n)
     // out: (w / stride, h / stride, c , n)
 
     if (in.dims.len() != 4) return error.InvalidDims;
 
     var out_dims_buf: []u32 = try cl_alloc.heap().alloc(u32, 4);
-    out_dims_buf[0] = in.dims.get(0) / stride;
-    out_dims_buf[1] = in.dims.get(1) / stride;
+    out_dims_buf[0] = in.dims.get(0) / x_stride;
+    out_dims_buf[1] = in.dims.get(1) / y_stride;
     out_dims_buf[2] = in.dims.get(2);
     out_dims_buf[3] = in.dims.get(3);
 
@@ -1002,25 +1002,26 @@ pub fn maxpool(self: Executor, cl_alloc: *cl.Alloc, in: Tensor, stride: u32) !Te
         .{ .buf = ret.buf },
         .{ .uint = in.dims.get(0) },
         .{ .uint = in.dims.get(1) },
-        .{ .uint = stride },
+        .{ .uint = x_stride },
+        .{ .uint = y_stride },
         .{ .uint = n },
     });
 
     return ret;
 }
 
-pub fn maxpoolGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_grads: Tensor, in: Tensor, stride: u32) !Tensor {
+pub fn maxpoolGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_grads: Tensor, in: Tensor, x_stride: u32, y_stride: u32) !Tensor {
     // downstream shape (out_w, out_h, c, n)
     // in shape (out_w * stride, out_h * stride, c, n)
     if (downstream_grads.dims.len() != in.dims.len()) {
         return error.InvalidDims;
     }
 
-    if (downstream_grads.dims.get(0) * stride != in.dims.get(0)) {
+    if (downstream_grads.dims.get(0) * x_stride != in.dims.get(0)) {
         return error.InvalidDims;
     }
 
-    if (downstream_grads.dims.get(1) * stride != in.dims.get(1)) {
+    if (downstream_grads.dims.get(1) * y_stride != in.dims.get(1)) {
         return error.InvalidDims;
     }
 
@@ -1040,7 +1041,8 @@ pub fn maxpoolGrad(self: Executor, cl_alloc: *cl.Alloc, downstream_grads: Tensor
         .{ .buf = out_grads.buf },
         .{ .uint = in.dims.get(0) },
         .{ .uint = in.dims.get(1) },
-        .{ .uint = stride },
+        .{ .uint = x_stride },
+        .{ .uint = y_stride },
         .{ .uint = n },
     });
 
@@ -2032,8 +2034,8 @@ test "maxpool" {
 
     const in_gpu = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, in_cpu, &.{ 4, 2, 2, 2 });
     const downstream_grads_gpu = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, downstream_grads, &.{ 2, 1, 2, 2 });
-    const out_gpu = try fixture.cl_math.maxpool(fixture.cl_alloc, in_gpu, 2);
-    const grads_gpu = try fixture.cl_math.maxpoolGrad(fixture.cl_alloc, downstream_grads_gpu, in_gpu, 2);
+    const out_gpu = try fixture.cl_math.maxpool(fixture.cl_alloc, in_gpu, 2, 2);
+    const grads_gpu = try fixture.cl_math.maxpoolGrad(fixture.cl_alloc, downstream_grads_gpu, in_gpu, 2, 2);
 
     const expected_dims = math.TensorDims.initRef(&.{ 2, 1, 2, 2 });
     try std.testing.expect(out_gpu.dims.eql(expected_dims));
@@ -2064,6 +2066,73 @@ test "maxpool" {
 
         0, 7, 0, 0,
         0, 0, 0, 8,
+    };
+
+    for (expected_grads, grads_cpu) |ex, ac| {
+        try std.testing.expectApproxEqAbs(ex, ac, 0.0001);
+    }
+}
+
+test "maxpool non-square" {
+    var fixture = try ClExecutorFixture.init();
+    defer fixture.deinit();
+
+    const in_cpu = &.{
+        1,  2,  8,
+        3,  4,  5,
+
+        9,  12, 13,
+        10, 11, 15,
+
+        2,  3,  9,
+        4,  5,  6,
+
+        10, 13, 14,
+        11, 12, 16,
+    };
+
+    const downstream_grads = &.{
+        1,
+        3,
+
+        5,
+        7,
+    };
+
+    const in_gpu = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, in_cpu, &.{ 3, 2, 2, 2 });
+    const downstream_grads_gpu = try fixture.cl_math.createTensorUntracked(fixture.cl_alloc, downstream_grads, &.{ 1, 1, 2, 2 });
+    const out_gpu = try fixture.cl_math.maxpool(fixture.cl_alloc, in_gpu, 3, 2);
+    const grads_gpu = try fixture.cl_math.maxpoolGrad(fixture.cl_alloc, downstream_grads_gpu, in_gpu, 3, 2);
+
+    const expected_dims = math.TensorDims.initRef(&.{ 1, 1, 2, 2 });
+    try std.testing.expect(out_gpu.dims.eql(expected_dims));
+
+    const out_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, out_gpu);
+    const grads_cpu = try fixture.cl_math.toCpu(fixture.cl_alloc.heap(), fixture.cl_alloc, grads_gpu);
+    const expected: []const f32 = &.{
+        8,
+        15,
+
+        9,
+        16,
+    };
+
+    for (expected, out_cpu) |ex, ac| {
+        try std.testing.expectApproxEqAbs(ex, ac, 0.0001);
+    }
+
+    const expected_grads: []const f32 = &.{
+        0, 0, 1,
+        0, 0, 0,
+
+        0, 0, 0,
+        0, 0, 3,
+
+        0, 0, 5,
+        0, 0, 0,
+
+        0, 0, 0,
+        0, 0, 7,
     };
 
     for (expected_grads, grads_cpu) |ex, ac| {

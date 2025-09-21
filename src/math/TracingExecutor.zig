@@ -24,7 +24,8 @@ const Operation = union(enum) {
     },
     maxpool: struct {
         in: NodeId,
-        stride: u32,
+        x_stride: u32,
+        y_stride: u32,
     },
     reshape: NodeId,
     squared_err: TwoParam,
@@ -164,13 +165,14 @@ pub fn convMany(self: *TracingExecutor, cl_alloc: *cl.Alloc, in: Tensor, kernel:
     );
 }
 
-pub fn maxpool(self: *TracingExecutor, cl_alloc: *cl.Alloc, in: Tensor, stride: u32) !Tensor {
+pub fn maxpool(self: *TracingExecutor, cl_alloc: *cl.Alloc, in: Tensor, x_stride: u32, y_stride: u32) !Tensor {
     return try self.appendNode(
-        try self.inner.maxpool(cl_alloc, self.getClTensor(in.buf), stride),
+        try self.inner.maxpool(cl_alloc, self.getClTensor(in.buf), x_stride, y_stride),
         .{
             .maxpool = .{
                 .in = in.buf,
-                .stride = stride,
+                .x_stride = x_stride,
+                .y_stride = y_stride,
             },
         },
     );
@@ -359,7 +361,7 @@ fn backpropInner(self: TracingExecutor, cl_alloc: *cl.Alloc, id: NodeId, downstr
         },
         .maxpool => |params| {
             const inputs = self.getClTensor(params.in);
-            const grads = try self.inner.maxpoolGrad(cl_alloc, downstream_gradients, inputs, params.stride);
+            const grads = try self.inner.maxpoolGrad(cl_alloc, downstream_gradients, inputs, params.x_stride, params.y_stride);
 
             try self.inner.addAssign(cl_alloc, gradient_tree.get(params.in), grads);
 

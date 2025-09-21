@@ -301,7 +301,8 @@ pub fn convLayer(comptime Executor: type, cl_alloc: *cl.Alloc, weights_initializ
 pub fn MaxPool(comptime Executor: type) type {
     return struct {
         name: []const u8,
-        stride: u32,
+        x_stride: u32,
+        y_stride: u32,
 
         const Self = @This();
 
@@ -314,7 +315,7 @@ pub fn MaxPool(comptime Executor: type) type {
 
         fn execute(ctx: ?*anyopaque, cl_alloc: *cl.Alloc, executor: *Executor, input: Executor.Tensor) !Executor.Tensor {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            return try executor.maxpool(cl_alloc, input, self.stride);
+            return try executor.maxpool(cl_alloc, input, self.x_stride, self.y_stride);
         }
 
         pub fn layer(self: *Self) Layer(Executor) {
@@ -327,12 +328,18 @@ pub fn MaxPool(comptime Executor: type) type {
     };
 }
 
-pub fn maxpoolLayer(comptime Executor: type, alloc: std.mem.Allocator, stride: u32) !Layer(Executor) {
+pub fn maxpoolLayer(
+    comptime Executor: type,
+    alloc: std.mem.Allocator,
+    x_stride: u32,
+    y_stride: u32,
+) !Layer(Executor) {
     const ret = try alloc.create(MaxPool(Executor));
 
     ret.* = .{
-        .name = try std.fmt.allocPrint(alloc, "maxpool {d}", .{stride}),
-        .stride = stride,
+        .name = try std.fmt.allocPrint(alloc, "maxpool {d} {d}", .{ x_stride, y_stride }),
+        .x_stride = x_stride,
+        .y_stride = y_stride,
     };
 
     return ret.layer();
@@ -585,7 +592,7 @@ pub fn modelFromConfig(
                 layer_checkpoint,
             ),
             .relu => |leak| try reluLayer(Executor, cl_alloc.heap(), leak),
-            .maxpool => |params| try maxpoolLayer(Executor, cl_alloc.heap(), params),
+            .maxpool => |params| try maxpoolLayer(Executor, cl_alloc.heap(), params[0], params[1]),
             .reshape => |params| try reshapeLayer(Executor, cl_alloc.heap(), params),
             .fully_connected => |params| try fullyConnectedLayer(
                 Executor,

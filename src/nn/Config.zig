@@ -13,7 +13,7 @@ pub const Initializer = enum {
 pub const LayerDef = union(enum) {
     conv: struct { Initializer, u32, u32, u32, u32 },
     relu: f32,
-    maxpool: u32,
+    maxpool: [2]u32,
     reshape: []const u32,
     fully_connected: struct { Initializer, Initializer, u32, u32 },
 };

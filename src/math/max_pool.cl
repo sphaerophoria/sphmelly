@@ -3,23 +3,24 @@ uint calc_max(
     __global float* in,
     uint in_width,
     uint in_height,
-    uint stride,
+    uint x_stride,
+    uint y_stride,
     float* out_val
 ) {
-    uint output_x = global_id % (in_width / stride);
-    uint output_y = global_id / (in_width / stride);
+    uint output_x = global_id % (in_width / x_stride);
+    uint output_y = global_id / (in_width / x_stride);
 
-    uint in_x = output_x * stride;
-    uint in_y = (output_y * stride) % in_height;
-    uint in_channel = (output_y * stride) / in_height;
+    uint in_x = output_x * x_stride;
+    uint in_y = (output_y * y_stride) % in_height;
+    uint in_channel = (output_y * y_stride) / in_height;
 
     uint max_idx;
     *out_val = -INFINITY;
 
-    for (int y = in_y; y < stride + in_y; y++) {
+    for (int y = in_y; y < y_stride + in_y; y++) {
         if (y >= in_height) continue;
 
-        for (int x = in_x; x < stride + in_x; x++) {
+        for (int x = in_x; x < x_stride + in_x; x++) {
             if (x >= in_width) continue;
 
             uint idx = in_channel * in_width * in_height + y * in_width + x;
@@ -39,7 +40,8 @@ __kernel void maxpool(
         __global float* out,
         uint in_width,
         uint in_height,
-        uint stride,
+        uint x_stride,
+        uint y_stride,
         uint n
 ) {
     // (w, h, c, n)
@@ -48,7 +50,7 @@ __kernel void maxpool(
     if (global_id >= n) return;
 
     float out_val;
-    calc_max(global_id, in, in_width, in_height, stride, &out_val);
+    calc_max(global_id, in, in_width, in_height, x_stride, y_stride, &out_val);
 
     out[global_id] = out_val;
 }
@@ -59,13 +61,14 @@ __kernel void maxpool_grad(
         __global float* out,
         uint in_width,
         uint in_height,
-        uint stride,
+        uint x_stride,
+        uint y_stride,
         uint n
 ) {
     uint global_id = get_global_id(0);
     if (global_id >= n) return;
 
     float out_val;
-    uint max_idx = calc_max(global_id, in, in_width, in_height, stride, &out_val);
+    uint max_idx = calc_max(global_id, in, in_width, in_height, x_stride, y_stride, &out_val);
     out[max_idx] = downstream_grads[global_id];
 }
